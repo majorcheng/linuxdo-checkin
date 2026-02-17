@@ -30,6 +30,7 @@ jobs:
         env:
           USERNAME: ${{ secrets.USERNAME }}
           PASSWORD: ${{ secrets.PASSWORD }}
+          LINUXDO_COOKIE_T: ${{ secrets.LINUXDO_COOKIE_T }}
           LINUXDO_USERNAME: ${{ secrets.LINUXDO_USERNAME }}
           LINUXDO_PASSWORD: ${{ secrets.LINUXDO_PASSWORD }}
           GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
