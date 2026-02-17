@@ -114,7 +114,7 @@ class LinuxDoBrowser:
         if self.page.ele("@id=current-user", timeout=10):
             logger.success("✅ Cookie 登录验证成功！")
             return True
-        else
+        else:
             logger.error("❌ 登录验证失败，Cookie 可能已失效或 LINUXDO_COOKIE_T 设置错误")
             # 打印当前页面标题辅助排查
             logger.info(f"当前页面标题: {self.page.title}")
