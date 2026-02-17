@@ -1,6 +1,6 @@
 """
 cron: 0 */6 * * *
-new Env("Linux.Do 签到")
+new Env("Linux.Do Cookie 签到")
 """
 
 import os
@@ -44,17 +44,12 @@ def retry_decorator(retries=3, min_delay=5, max_delay=10):
 os.environ.pop("DISPLAY", None)
 os.environ.pop("DYLD_LIBRARY_PATH", None)
 
-USERNAME = os.environ.get("LINUXDO_USERNAME")
-PASSWORD = os.environ.get("LINUXDO_PASSWORD")
+COOKIE_T = os.environ.get("LINUXDO_COOKIE_T")
 BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in [
     "false",
     "0",
     "off",
 ]
-if not USERNAME:
-    USERNAME = os.environ.get("USERNAME")
-if not PASSWORD:
-    PASSWORD = os.environ.get("PASSWORD")
 
 HOME_URL = "https://linux.do/"
 LOGIN_URL = "https://linux.do/login"
@@ -98,107 +93,35 @@ class LinuxDoBrowser:
         self.notifier = NotificationManager()
 
     def login(self):
-        logger.info("开始登录")
-        # Step 1: Get CSRF Token
-        logger.info("获取 CSRF token...")
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": LOGIN_URL,
-        }
-        resp_csrf = self.session.get(CSRF_URL, headers=headers, impersonate="firefox135")
-        if resp_csrf.status_code != 200:
-            logger.error(f"获取 CSRF token 失败: {resp_csrf.status_code}")
-            return False        
-        csrf_data = resp_csrf.json()
-        csrf_token = csrf_data.get("csrf")
-        logger.info(f"CSRF Token obtained: {csrf_token[:10]}...")
-
-        # Step 2: Login
-        logger.info("正在登录...")
-        headers.update(
-            {
-                "X-CSRF-Token": csrf_token,
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin": "https://linux.do",
-            }
-        )
-
-        data = {
-            "login": USERNAME,
-            "password": PASSWORD,
-            "second_factor_method": "1",
-            "timezone": "Asia/Shanghai",
-        }
-
-        try:
-            resp_login = self.session.post(
-                SESSION_URL, data=data, impersonate="chrome136", headers=headers
-            )
-
-            if resp_login.status_code == 200:
-                response_json = resp_login.json()
-                if response_json.get("error"):
-                    logger.error(f"登录失败: {response_json.get('error')}")
-                    return False
-                logger.info("登录成功!")
-            else:
-                logger.error(f"登录失败，状态码: {resp_login.status_code}")
-                logger.error(resp_login.text)
-                return False
-        except Exception as e:
-            logger.error(f"登录请求异常: {e}")
-            return False
-
-        self.print_connect_info()  # 打印连接信息
-
-        # Step 3: Pass cookies to DrissionPage
-        logger.info("同步 Cookie 到 DrissionPage...")
-
-        # Convert requests cookies to DrissionPage format
-        # Using standard requests.utils to parse cookiejar if possible, or manual extraction
-        # requests.Session().cookies is a specialized object, but might support standard iteration
-
-        # We can iterate over the cookies manually if dict_from_cookiejar doesn't work perfectly
-        # or convert to dict first.
-        # Assuming requests behaves like requests:
-
-        cookies_dict = self.session.cookies.get_dict()
-
-        dp_cookies = []
-        for name, value in cookies_dict.items():
-            dp_cookies.append(
-                {
-                    "name": name,
-                    "value": value,
-                    "domain": ".linux.do",
-                    "path": "/",
-                }
-            )
-
-        self.page.set.cookies(dp_cookies)
-
-        logger.info("Cookie 设置完成，导航至 linux.do...")
-        self.page.get(HOME_URL)
-
+        logger.info("正在尝试使用 Cookie 登录...")
+        # 必须先访问一次域名才能注入该域名的 Cookie
+        self.page.get("https://linux.do/")
+        time.sleep(3)
+        
+        # 注入验证身份的关键 Cookie '_t'
+        self.page.set.cookies({
+            'name': '_t',
+            'value': COOKIE_T,
+            'domain': '.linux.do',
+            'path': '/'
+        })
+        
+        # 刷新页面以应用 Cookie
+        self.page.refresh()
         time.sleep(5)
-        try:
-            user_ele = self.page.ele("@id=current-user")
-        except Exception as e:
-            logger.warning(f"登录验证失败: {str(e)}")
+
+        # 检查是否成功看到用户头像
+        if self.page.ele("@id=current-user", timeout=10):
+            logger.success("✅ Cookie 登录验证成功！")
             return True
-        if not user_ele:
-            # Fallback check for avatar
-            if "avatar" in self.page.html:
-                logger.info("登录验证成功 (通过 avatar)")
-                return True
-            logger.error("登录验证失败 (未找到 current-user)")
+        else
+            logger.error("❌ 登录验证失败，Cookie 可能已失效或 LINUXDO_COOKIE_T 设置错误")
+            # 打印当前页面标题辅助排查
+            logger.info(f"当前页面标题: {self.page.title}")
             return False
-        else:
-            logger.info("登录验证成功")
-            return True
+
+        logger.info("导航至 linux.do...")
+        self.page.get(HOME_URL)
 
     def click_topic(self):
         topic_list = self.page.ele("@id=list-area").eles(".:title")
@@ -326,8 +249,8 @@ class LinuxDoBrowser:
 
 
 if __name__ == "__main__":
-    if not USERNAME or not PASSWORD:
-        print("Please set USERNAME and PASSWORD")
+    if not COOKIE_T:
+        print("Please set COOKIE_T")
         exit(1)
     browser = LinuxDoBrowser()
     browser.run()
