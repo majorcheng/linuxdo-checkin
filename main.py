@@ -44,6 +44,7 @@ def retry_decorator(retries=3, min_delay=5, max_delay=10):
 os.environ.pop("DISPLAY", None)
 os.environ.pop("DYLD_LIBRARY_PATH", None)
 
+USERNAME = os.environ.get("LINUXDO_USERNAME")
 COOKIE_T = os.environ.get("LINUXDO_COOKIE_T")
 BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in [
     "false",
@@ -128,9 +129,34 @@ class LinuxDoBrowser:
         if not topic_list:
             logger.error("未找到主题帖")
             return False
-        logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择10个")
-        for topic in random.sample(topic_list, 10):
-            self.click_one_topic(topic.attr("href"))
+        
+        # 确保至少浏览10分钟（600秒）
+        min_browse_time = 600
+        start_time = time.time()
+        
+        logger.info(f"发现 {len(topic_list)} 个主题帖，开始浏览至少10分钟...")
+        
+        # 持续浏览直到达到最小时间
+        browsed_count = 0
+        while time.time() - start_time < min_browse_time:
+            # 随机选择一批帖子浏览
+            sample_size = min(10, len(topic_list))
+            topics_to_browse = random.sample(topic_list, sample_size)
+            
+            for topic in topics_to_browse:
+                elapsed = time.time() - start_time
+                if elapsed >= min_browse_time:
+                    logger.success(f"✅ 已完成 {elapsed/60:.1f} 分钟的浏览，共浏览 {browsed_count} 个帖子")
+                    return True
+                
+                self.click_one_topic(topic.attr("href"))
+                browsed_count += 1
+                
+                # 显示进度
+                remaining = min_browse_time - elapsed
+                logger.info(f"已浏览 {browsed_count} 个帖子，已用时 {elapsed/60:.1f} 分钟，还需 {remaining/60:.1f} 分钟")
+        
+        logger.success(f"✅ 浏览任务完成，共浏览 {browsed_count} 个帖子，用时 {(time.time()-start_time)/60:.1f} 分钟")
         return True
 
     @retry_decorator()
@@ -138,7 +164,8 @@ class LinuxDoBrowser:
         new_page = self.browser.new_tab()
         try:
             new_page.get(topic_url)
-            if random.random() < 0.3:  # 0.3 * 30 = 9
+            # 增加点赞概率到50%
+            if random.random() < 0.5:
                 self.click_like(new_page)
             self.browse_post(new_page)
         finally:
@@ -149,17 +176,14 @@ class LinuxDoBrowser:
 
     def browse_post(self, page):
         prev_url = None
-        # 开始自动滚动，最多滚动10次
-        for _ in range(10):
+        # 增加滚动次数，每个帖子浏览更长时间
+        max_scrolls = random.randint(15, 20)
+        for i in range(max_scrolls):
             # 随机滚动一段距离
             scroll_distance = random.randint(550, 650)  # 随机滚动 550-650 像素
             logger.info(f"向下滚动 {scroll_distance} 像素...")
             page.run_js(f"window.scrollBy(0, {scroll_distance})")
             logger.info(f"已加载页面: {page.url}")
-
-            if random.random() < 0.03:  # 33 * 4 = 132
-                logger.success("随机退出浏览")
-                break
 
             # 检查是否到达页面底部
             at_bottom = page.run_js(
@@ -172,8 +196,8 @@ class LinuxDoBrowser:
                 logger.success("已到达页面底部，退出浏览")
                 break
 
-            # 动态随机等待
-            wait_time = random.uniform(2, 4)  # 随机等待 2-4 秒
+            # 增加等待时间，让浏览更自然
+            wait_time = random.uniform(3, 6)  # 随机等待 3-6 秒
             logger.info(f"等待 {wait_time:.2f} 秒...")
             time.sleep(wait_time)
 
