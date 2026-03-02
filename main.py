@@ -356,7 +356,8 @@ class LinuxDoBrowser:
             else:
                 login_res = self.login()
             if not login_res:  # 登录
-                logger.warning("登录验证失败")
+                logger.error("登录验证失败，程序终止")
+                return
 
             login_start_ts = time.time()
             deadline_ts = login_start_ts + MIN_ONLINE_SECONDS
