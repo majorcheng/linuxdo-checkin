@@ -61,6 +61,7 @@ HOME_URL = "https://linux.do/"
 LOGIN_URL = "https://linux.do/login"
 SESSION_URL = "https://linux.do/session"
 CSRF_URL = "https://linux.do/session/csrf"
+MIN_ONLINE_SECONDS = 10 * 60
 
 
 class LinuxDoBrowser:
@@ -248,15 +249,57 @@ class LinuxDoBrowser:
             logger.info("登录验证成功")
             return True
 
-    def click_topic(self):
-        topic_list = self.page.ele("@id=list-area").eles(".:title")
-        if not topic_list:
-            logger.error("未找到主题帖")
-            return False
-        logger.info(f"发现 {len(topic_list)} 个主题帖，随机选择10个")
-        for topic in random.sample(topic_list, 10):
-            self.click_one_topic(topic.attr("href"))
-        return True
+    def click_topic(self, deadline_ts):
+        seen_urls = set()
+        processed_count = 0
+        max_rounds = 500
+        empty_retry_count = 0
+        max_empty_retries = 20
+
+        while time.time() <= deadline_ts and processed_count < max_rounds:
+            list_area = self.page.ele("@id=list-area")
+            topic_list = list_area.eles(".:title") if list_area else []
+            topic_urls = []
+            for topic in topic_list:
+                topic_url = topic.attr("href")
+                if topic_url:
+                    topic_urls.append(topic_url)
+
+            if not topic_urls:
+                empty_retry_count += 1
+                logger.warning("未找到主题帖，稍后重试")
+                if empty_retry_count >= max_empty_retries:
+                    logger.error("多次未找到主题帖，结束浏览任务")
+                    return processed_count > 0
+                time.sleep(random.uniform(2, 4))
+                self.page.refresh()
+                continue
+
+            empty_retry_count = 0
+            unique_topic_urls = list(dict.fromkeys(topic_urls))
+            unvisited_urls = [url for url in unique_topic_urls if url not in seen_urls]
+            if not unvisited_urls:
+                seen_urls.clear()
+                unvisited_urls = unique_topic_urls
+                logger.info("当前页面主题帖已轮询一遍，重置已访问集合")
+
+            picked_url = random.choice(unvisited_urls)
+            seen_urls.add(picked_url)
+            logger.info(
+                f"随机抽取第 {processed_count + 1} 个帖子进行浏览: {picked_url}"
+            )
+            self.click_one_topic(picked_url)
+            processed_count += 1
+
+            if time.time() > deadline_ts:
+                logger.success("登录在线时长已超过10分钟，结束浏览任务")
+                break
+
+        if processed_count >= max_rounds:
+            logger.warning(f"达到最大浏览轮次限制({max_rounds})，提前结束浏览任务")
+
+        logger.info(f"本次共浏览 {processed_count} 个帖子")
+        return processed_count > 0
 
     @retry_decorator()
     def click_one_topic(self, topic_url):
@@ -315,12 +358,18 @@ class LinuxDoBrowser:
             if not login_res:  # 登录
                 logger.warning("登录验证失败")
 
+            login_start_ts = time.time()
+            deadline_ts = login_start_ts + MIN_ONLINE_SECONDS
+            logger.info(f"登录后目标在线时长: 至少 {MIN_ONLINE_SECONDS} 秒")
+
             if BROWSE_ENABLED:
-                click_topic_res = self.click_topic()  # 点击主题
+                click_topic_res = self.click_topic(deadline_ts)  # 点击主题
                 if not click_topic_res:
                     logger.error("点击主题失败，程序终止")
                     return
                 logger.info("完成浏览任务")
+            online_seconds = time.time() - login_start_ts
+            logger.info(f"本次登录在线时长: {online_seconds:.2f} 秒")
             self.print_connect_info()  # 打印连接信息
             self.send_notifications(BROWSE_ENABLED)  # 发送通知
         finally:
