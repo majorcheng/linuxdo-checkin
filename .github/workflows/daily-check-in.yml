@@ -25,6 +25,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          scrapling install
 
       - name: Execute script
         env:
@@ -40,7 +41,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           LINUXDO_COOKIES: ${{ secrets.LINUXDO_COOKIES }}
+          LINUXDO_CONNECT_COOKIES: ${{ secrets.LINUXDO_CONNECT_COOKIES }}
           BROWSE_ENABLED: ${{ secrets.BROWSE_ENABLED }}
+          LINUXDO_PROXY_URL: ${{ secrets.LINUXDO_PROXY_URL }}
+          LINUXDO_PROXY_INSECURE: ${{ secrets.LINUXDO_PROXY_INSECURE }}
         run: |
           python main.py
 
