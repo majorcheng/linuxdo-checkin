@@ -753,6 +753,12 @@ class LinuxDoBrowser:
         self.page = self.browser.context.new_page()
         self.page.set_default_navigation_timeout(browser_timeout_ms())
         self.page.set_default_timeout(browser_timeout_ms())
+        self._refresh_home_page()
+
+    def _refresh_home_page(self) -> None:
+        if self.page is None:
+            raise RuntimeError("首页页面未初始化")
+
         self.page.goto(HOME_URL, wait_until="domcontentloaded")
         try:
             self.page.wait_for_load_state("networkidle", timeout=5_000)
@@ -790,6 +796,36 @@ class LinuxDoBrowser:
 
         return []
 
+    def _wait_for_topic_urls(self, attempts: int = 3, wait_ms: int = 1_200) -> List[str]:
+        for attempt in range(1, attempts + 1):
+            topic_urls = self._extract_topic_urls()
+            if topic_urls:
+                if attempt > 1:
+                    logger.info(f"主题列表延迟加载，等待后恢复，共找到 {len(topic_urls)} 个候选帖子")
+                return topic_urls
+
+            if attempt < attempts and self.page is not None:
+                try:
+                    self.page.wait_for_timeout(wait_ms)
+                except Exception:
+                    time.sleep(wait_ms / 1000)
+
+        return []
+
+    def _inspect_home_page_state(self) -> Tuple[str, Optional[str], Dict[str, Any]]:
+        if self.page is None:
+            snapshot = {"url": "", "title": "", "body_text": ""}
+            return "unknown_page", "首页页面不存在", snapshot
+
+        snapshot: Dict[str, Any] = {
+            "url": getattr(self.page, "url", "") or "",
+            "title": safe_title(self.page),
+            "body_text": safe_body_text(self.page),
+        }
+        snapshot.update(count_auth_controls(self.page))
+        status_code, reason = classify_login_snapshot(snapshot)
+        return status_code, reason, snapshot
+
     def click_topic(self, deadline_ts: float) -> bool:
         self._open_home_page()
 
@@ -800,17 +836,49 @@ class LinuxDoBrowser:
         max_empty_retries = 20
 
         while time.time() <= deadline_ts and processed_count < max_rounds:
-            topic_urls = self._extract_topic_urls()
+            topic_urls = self._wait_for_topic_urls()
             if not topic_urls:
                 empty_retry_count += 1
-                logger.warning("未找到主题帖，稍后重试")
+                status_code, reason, snapshot = self._inspect_home_page_state()
+                log_func = logger.info if empty_retry_count <= 2 else logger.warning
+                log_func(
+                    "首页未拿到主题帖，稍后重试: "
+                    f"retry={empty_retry_count}/{max_empty_retries}, "
+                    f"status={status_code}, "
+                    f"url={snapshot.get('url', '<unknown>') or '<unknown>'}, "
+                    f"title={snapshot.get('title', '<unknown>') or '<unknown>'}"
+                )
+                if reason and empty_retry_count in {1, 3, 6, 10, max_empty_retries}:
+                    logger.info(f"首页状态提示: {reason}")
+                if status_code in {"login_page", "cookie_invalid"}:
+                    logger.error("浏览过程中登录态疑似失效，提前结束浏览任务")
+                    return processed_count > 0
                 if empty_retry_count >= max_empty_retries:
                     logger.error("多次未找到主题帖，结束浏览任务")
                     return processed_count > 0
-                time.sleep(random.uniform(2, 4))
+
+                wait_seconds = random.uniform(4, 6) if status_code == "cf_challenge" else random.uniform(2, 4)
+                time.sleep(wait_seconds)
+
                 try:
-                    self.page.reload(wait_until="domcontentloaded")
-                except Exception:
+                    if empty_retry_count <= 2:
+                        logger.info("首页主题列表可能仍在异步加载，继续等待当前页恢复")
+                        if self.page is not None:
+                            self.page.wait_for_timeout(1_500)
+                    elif empty_retry_count <= 5:
+                        logger.info("首页连续空列表，重新进入主页")
+                        self._refresh_home_page()
+                    elif empty_retry_count <= 8:
+                        logger.warning("首页多次空列表，重建首页页签后重试")
+                        self._open_home_page()
+                    else:
+                        logger.warning("首页持续空列表，触发登录态复检")
+                        if not self._validate_login_state("浏览恢复"):
+                            logger.error("浏览恢复阶段登录态复检失败，提前结束浏览任务")
+                            return processed_count > 0
+                        self._open_home_page()
+                except Exception as exc:
+                    logger.warning(f"首页恢复动作失败，改为重建首页页签: {str(exc)}")
                     self._open_home_page()
                 continue
 
@@ -825,6 +893,7 @@ class LinuxDoBrowser:
             seen_urls.add(picked_url)
             logger.info(f"随机抽取第 {processed_count + 1} 个帖子进行浏览: {picked_url}")
             self.click_one_topic(picked_url)
+            logger.info("当前帖子浏览完成，准备刷新首页主题列表")
             processed_count += 1
 
             if time.time() > deadline_ts:
@@ -832,7 +901,7 @@ class LinuxDoBrowser:
                 break
 
             try:
-                self.page.reload(wait_until="domcontentloaded")
+                self._refresh_home_page()
             except Exception:
                 self._open_home_page()
 
@@ -861,6 +930,7 @@ class LinuxDoBrowser:
 
     def browse_post(self, page: Any) -> None:
         previous_scroll_y = -1
+        stopped_early = False
         for _ in range(10):
             scroll_distance = random.randint(550, 650)
             logger.info(f"向下滚动 {scroll_distance} 像素...")
@@ -873,6 +943,7 @@ class LinuxDoBrowser:
 
             if random.random() < 0.03:
                 logger.success("随机退出浏览")
+                stopped_early = True
                 break
 
             try:
@@ -888,12 +959,16 @@ class LinuxDoBrowser:
 
             if at_bottom and scroll_y == previous_scroll_y:
                 logger.success("已到达页面底部，退出浏览")
+                stopped_early = True
                 break
 
             previous_scroll_y = scroll_y
             wait_time = random.uniform(2, 4)
             logger.info(f"等待 {wait_time:.2f} 秒...")
             time.sleep(wait_time)
+
+        if not stopped_early:
+            logger.info("达到单帖浏览步数上限，结束当前帖子")
 
     def click_like(self, page: Any) -> None:
         selectors = (
