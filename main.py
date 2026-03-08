@@ -86,6 +86,13 @@ CLOUDFLARE_KEYWORDS = (
     "/cdn-cgi/challenge-platform/",
     "Enable JavaScript and cookies to continue",
 )
+RATE_LIMIT_TITLES = (
+    "You are being rate limited",
+)
+RATE_LIMIT_KEYWORDS = (
+    "You are being rate limited",
+    "rate limited",
+)
 
 
 def retry_decorator(retries: int = 3, min_delay: int = 5, max_delay: int = 10):
@@ -153,6 +160,31 @@ def is_cloudflare_snapshot(snapshot: Dict[str, Any]) -> bool:
     return any(keyword in body_text for keyword in CLOUDFLARE_KEYWORDS)
 
 
+def is_rate_limited_snapshot(snapshot: Dict[str, Any]) -> bool:
+    title = snapshot.get("title", "") or ""
+    body_text = snapshot.get("body_text", "") or ""
+    if any(keyword in title for keyword in RATE_LIMIT_TITLES):
+        return True
+    return any(keyword in body_text for keyword in RATE_LIMIT_KEYWORDS)
+
+
+def wait_seconds(min_seconds: float, max_seconds: float, label: str) -> float:
+    seconds = random.uniform(min_seconds, max_seconds)
+    logger.info(f"{label} {seconds:.2f} 秒")
+    time.sleep(seconds)
+    return seconds
+
+
+def wait_page_seconds(page: Any, min_seconds: float, max_seconds: float, label: str) -> float:
+    seconds = random.uniform(min_seconds, max_seconds)
+    logger.info(f"{label} {seconds:.2f} 秒")
+    try:
+        page.wait_for_timeout(int(seconds * 1000))
+    except Exception:
+        time.sleep(seconds)
+    return seconds
+
+
 def count_auth_controls(page: Any) -> Dict[str, int]:
     return {
         "current_user_count": safe_count(page, "#current-user"),
@@ -183,6 +215,9 @@ def classify_login_snapshot(snapshot: Dict[str, Any]) -> Tuple[str, Optional[str
 
     if is_cloudflare_snapshot(snapshot):
         return "cf_challenge", "登录检测阶段遭遇 Cloudflare/风控页"
+
+    if is_rate_limited_snapshot(snapshot):
+        return "rate_limited", "主页触发站点限流，需冷却后重试"
 
     if "/login" in current_url or "/session/sso_provider" in current_url:
         return "login_page", "跳转到了登录页或 SSO 页面，Cookie 可能失效"
@@ -764,7 +799,7 @@ class LinuxDoBrowser:
             self.page.wait_for_load_state("networkidle", timeout=5_000)
         except Exception:
             pass
-        self.page.wait_for_timeout(1_000)
+        wait_page_seconds(self.page, 2.0, 3.5, "主页恢复后额外等待")
 
     def _extract_topic_urls(self) -> List[str]:
         if self.page is None:
@@ -853,18 +888,34 @@ class LinuxDoBrowser:
                 if status_code in {"login_page", "cookie_invalid"}:
                     logger.error("浏览过程中登录态疑似失效，提前结束浏览任务")
                     return processed_count > 0
-                if empty_retry_count >= max_empty_retries:
+                if empty_retry_count > max_empty_retries:
                     logger.error("多次未找到主题帖，结束浏览任务")
                     return processed_count > 0
 
-                wait_seconds = random.uniform(4, 6) if status_code == "cf_challenge" else random.uniform(2, 4)
-                time.sleep(wait_seconds)
-
                 try:
+                    if status_code == "rate_limited":
+                        if empty_retry_count <= 2:
+                            wait_seconds(12, 18, "命中限流页，冷却后停留当前主页")
+                        elif empty_retry_count <= 5:
+                            wait_seconds(18, 28, "命中限流页，冷却后重新进入主页")
+                            self._refresh_home_page()
+                        elif empty_retry_count <= 8:
+                            wait_seconds(25, 40, "命中限流页，冷却后重建首页页签")
+                            self._open_home_page()
+                        else:
+                            wait_seconds(30, 45, "命中限流页，长冷却后重建首页页签")
+                            self._open_home_page()
+                        continue
+
+                    if status_code == "cf_challenge":
+                        wait_seconds(4, 6, "主页触发 Cloudflare，等待后再恢复")
+                    else:
+                        wait_seconds(2, 4, "首页未拿到主题帖，短暂等待后恢复")
+
                     if empty_retry_count <= 2:
                         logger.info("首页主题列表可能仍在异步加载，继续等待当前页恢复")
                         if self.page is not None:
-                            self.page.wait_for_timeout(1_500)
+                            wait_page_seconds(self.page, 1.2, 1.8, "当前主页额外等待")
                     elif empty_retry_count <= 5:
                         logger.info("首页连续空列表，重新进入主页")
                         self._refresh_home_page()
@@ -900,6 +951,7 @@ class LinuxDoBrowser:
                 logger.success("登录在线时长已超过10分钟，结束浏览任务")
                 break
 
+            wait_seconds(5, 9, "帖子浏览结束，返回主页前冷却")
             try:
                 self._refresh_home_page()
             except Exception:
@@ -918,7 +970,7 @@ class LinuxDoBrowser:
         page.set_default_timeout(browser_timeout_ms())
         try:
             page.goto(topic_url, wait_until="domcontentloaded")
-            page.wait_for_timeout(1_000)
+            wait_page_seconds(page, 2.0, 4.0, "进入帖子后停留")
             if random.random() < 0.3:
                 self.click_like(page)
             self.browse_post(page)
@@ -938,7 +990,7 @@ class LinuxDoBrowser:
                 page.mouse.wheel(0, scroll_distance)
             except Exception:
                 page.evaluate(f"window.scrollBy(0, {scroll_distance})")
-            page.wait_for_timeout(random.randint(1800, 2600))
+            wait_page_seconds(page, 2.8, 4.2, "滚动后页面沉淀")
             logger.info(f"已加载页面: {getattr(page, 'url', '')}")
 
             if random.random() < 0.03:
@@ -963,9 +1015,7 @@ class LinuxDoBrowser:
                 break
 
             previous_scroll_y = scroll_y
-            wait_time = random.uniform(2, 4)
-            logger.info(f"等待 {wait_time:.2f} 秒...")
-            time.sleep(wait_time)
+            wait_seconds(4, 7, "浏览主题随机停留")
 
         if not stopped_early:
             logger.info("达到单帖浏览步数上限，结束当前帖子")
