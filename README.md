@@ -11,7 +11,7 @@
 
 当前主运行栈已从 `DrissionPage` 切换到 `Scrapling`。
 
-- CI / 本地首次安装 Python 依赖后，需要额外执行一次 `scrapling install`，用于准备 Scrapling 所需的浏览器运行时。
+- CI / 本地首次安装 Python 依赖后，需要额外执行一次 `scrapling install`，用于准备 Scrapling 所需的浏览器运行时；当前 Scrapling 运行栈要求 Python 3.10+，推荐 Python 3.11。
 - `LINUXDO_PROXY_URL` / `LINUXDO_PROXY_INSECURE` 的代理语义保持不变，仍然只影响浏览器访问 Linux.do 的出口链路。
 - README 中旧的 DrissionPage / Playwright 表述已不再适用，后续登录与浏览链路都以 Scrapling 运行时为准。
 
@@ -76,6 +76,8 @@
 
 ### GitHub Actions 自动运行
 
+当前 GitHub Actions 运行时基线为 **Python 3.11**。
+
 此项目的 GitHub Actions 配置会自动每天运行2次签到脚本。你无需进行任何操作即可启动此自动化任务。GitHub Actions 的工作流文件位于 `.github/workflows` 目录下，文件名为 `daily-check-in.yml`。
 
 工作流首次运行时会依次执行：
@@ -116,7 +118,7 @@
 
 ### 青龙面板使用
 
-*注意：如果是docker容器创建的青龙，**请使用`whyour/qinglong:debian`镜像**，latest（alpine）版本可能无法安装部分依赖*
+*注意：如果是docker容器创建的青龙，**请使用`whyour/qinglong:debian`镜像**，latest（alpine）版本可能无法安装部分依赖；同时建议容器内 Python 版本不低于 **3.10**，推荐 **3.11***
 
 1. **依赖安装**
     - 安装Python依赖
