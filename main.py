@@ -62,6 +62,7 @@ CONNECT_URL = "https://connect.linux.do/"
 MIN_ONLINE_SECONDS = 10 * 60
 SCRAPLING_TIMEOUT_MS = 60_000
 LOGIN_FAILURE_SCREENSHOT = "login_check_failed.png"
+CF_POST_SOLVE_SETTLE_MS = 15_000
 
 SHARED_DOMAIN_COOKIE_NAMES = {
     "cf_clearance",
@@ -78,6 +79,8 @@ CONNECT_HOST_COOKIE_NAMES = {
 CLOUDFLARE_TITLES = (
     "Just a moment...",
     "Attention Required! | Cloudflare",
+    "请稍候…",
+    "请稍候...",
 )
 CLOUDFLARE_KEYWORDS = (
     "Performing security verification",
@@ -92,6 +95,64 @@ RATE_LIMIT_TITLES = (
 RATE_LIMIT_KEYWORDS = (
     "You are being rate limited",
     "rate limited",
+)
+LOGIN_ENTRY_LINK_SELECTORS = (
+    "a[href*='/login']",
+    "a:has-text('登录')",
+    "a:has-text('Log In')",
+    "a:has-text('Sign In')",
+)
+LOGIN_ENTRY_BUTTON_SELECTORS = (
+    "button.login-button",
+    ".header-buttons .login-button",
+    "button:has-text('登录')",
+    "button:has-text('Log In')",
+    "button:has-text('Sign In')",
+)
+LOGIN_USERNAME_SELECTORS = (
+    "#login-account-name",
+    "#signin_username",
+    "input[name='login']",
+    "input[name='username']",
+    "input[type='email']",
+    "input[type='text']",
+)
+LOGIN_PASSWORD_SELECTORS = (
+    "#login-account-password",
+    "#signin_password",
+    "input[name='password']",
+    "input[type='password']",
+)
+LOGIN_SUBMIT_SELECTORS = (
+    "#login-button",
+    "#signin-button",
+    "button[type='submit']",
+    "button:has-text('登录')",
+    "button:has-text('Log In')",
+    "button:has-text('Sign In')",
+)
+LOGGED_IN_USER_SELECTORS = (
+    "#current-user",
+    ".header-dropdown-toggle.current-user",
+    ".current-user",
+    "[data-identifier='user-menu']",
+)
+HCAPTCHA_MODAL_SELECTORS = (
+    ".hcaptcha-verify-modal",
+    "#h-captcha-field",
+)
+HCAPTCHA_VERIFY_BUTTON_SELECTORS = (
+    ".hcaptcha-verify-modal .btn.btn-primary",
+    "button:has-text('验证')",
+)
+BLOCKED_TITLES = (
+    "Access denied",
+    "Sorry, you have been blocked",
+)
+BLOCKED_KEYWORDS = (
+    "Error code 1020",
+    "Access denied",
+    "Sorry, you have been blocked",
 )
 
 
@@ -152,6 +213,106 @@ def safe_count(page: Any, selector: str) -> int:
         return 0
 
 
+def safe_visible_count(page: Any, selector: str) -> int:
+    try:
+        locator = page.locator(selector)
+        count = locator.count()
+    except Exception:
+        return 0
+
+    visible_count = 0
+    for index in range(count):
+        try:
+            if locator.nth(index).is_visible():
+                visible_count += 1
+        except Exception:
+            continue
+    return visible_count
+
+
+def first_matching_locator(page: Any, selectors: Tuple[str, ...]) -> Any:
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            count = locator.count()
+        except Exception:
+            continue
+
+        for index in range(count):
+            candidate = locator.nth(index)
+            try:
+                if candidate.is_visible():
+                    return candidate
+            except Exception:
+                continue
+    return None
+
+
+def build_page_snapshot(page: Any, include_auth_signals: bool = False) -> Dict[str, Any]:
+    snapshot: Dict[str, Any] = {
+        "url": getattr(page, "url", "") or "",
+        "title": safe_title(page),
+        "body_text": safe_body_text(page),
+    }
+    if include_auth_signals:
+        snapshot.update(count_auth_controls(page))
+    return snapshot
+
+
+def count_login_form_controls(page: Any) -> Dict[str, int]:
+    return {
+        "username_input_count": safe_visible_count(page, ", ".join(LOGIN_USERNAME_SELECTORS)),
+        "password_input_count": safe_visible_count(page, ", ".join(LOGIN_PASSWORD_SELECTORS)),
+        "login_submit_count": safe_visible_count(page, ", ".join(LOGIN_SUBMIT_SELECTORS)),
+        "hcaptcha_modal_count": safe_visible_count(page, ", ".join(HCAPTCHA_MODAL_SELECTORS)),
+        "hcaptcha_verify_button_count": safe_visible_count(page, ", ".join(HCAPTCHA_VERIFY_BUTTON_SELECTORS)),
+        "hcaptcha_checkbox_frame_count": safe_visible_count(
+            page,
+            "iframe[src*='hcaptcha'][src*='frame=checkbox']",
+        ),
+        "hcaptcha_challenge_frame_count": safe_visible_count(
+            page,
+            "iframe[src*='hcaptcha'][src*='frame=challenge']",
+        ),
+    }
+
+
+def collect_page_snapshot(
+    page: Any,
+    include_auth_signals: bool = False,
+    include_login_form_signals: bool = False,
+) -> Dict[str, Any]:
+    snapshot = build_page_snapshot(page, include_auth_signals=include_auth_signals)
+    if include_login_form_signals:
+        snapshot.update(count_login_form_controls(page))
+    return snapshot
+
+
+def find_first_locator(page: Any, selectors: Tuple[str, ...]) -> Any:
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if locator.count() > 0:
+                return locator.first
+        except Exception:
+            continue
+    return None
+
+
+def wait_page_ready(page: Any, initial_delay_ms: int = 0) -> None:
+    if initial_delay_ms > 0:
+        try:
+            page.wait_for_timeout(initial_delay_ms)
+        except Exception:
+            time.sleep(initial_delay_ms / 1000)
+
+    for state_name, timeout_ms in (("domcontentloaded", 10_000), ("networkidle", 8_000)):
+        try:
+            page.wait_for_load_state(state_name, timeout=timeout_ms)
+        except Exception:
+            continue
+
+
 def is_cloudflare_snapshot(snapshot: Dict[str, Any]) -> bool:
     title = snapshot.get("title", "") or ""
     body_text = snapshot.get("body_text", "") or ""
@@ -166,6 +327,14 @@ def is_rate_limited_snapshot(snapshot: Dict[str, Any]) -> bool:
     if any(keyword in title for keyword in RATE_LIMIT_TITLES):
         return True
     return any(keyword in body_text for keyword in RATE_LIMIT_KEYWORDS)
+
+
+def is_blocked_snapshot(snapshot: Dict[str, Any]) -> bool:
+    title = snapshot.get("title", "") or ""
+    body_text = snapshot.get("body_text", "") or ""
+    if any(keyword in title for keyword in BLOCKED_TITLES):
+        return True
+    return any(keyword in body_text for keyword in BLOCKED_KEYWORDS)
 
 
 def wait_seconds(min_seconds: float, max_seconds: float, label: str) -> float:
@@ -189,29 +358,35 @@ def count_auth_controls(page: Any) -> Dict[str, int]:
     return {
         "current_user_count": safe_count(page, "#current-user"),
         "avatar_count": safe_count(page, "#current-user img, .header-dropdown-toggle.current-user img"),
-        "login_button_count": safe_count(
+        "user_menu_count": safe_visible_count(page, ", ".join(LOGGED_IN_USER_SELECTORS)),
+        "login_button_count": safe_visible_count(
             page,
-            "button:has-text('登录'), button:has-text('Log In'), button:has-text('Sign In')",
+            ", ".join(LOGIN_ENTRY_BUTTON_SELECTORS),
         ),
-        "login_link_count": safe_count(
+        "login_link_count": safe_visible_count(
             page,
-            "a[href*='/login'], a:has-text('登录'), a:has-text('Log In'), a:has-text('Sign In')",
+            ", ".join(LOGIN_ENTRY_LINK_SELECTORS),
         ),
-        "register_link_count": safe_count(
+        "register_link_count": safe_visible_count(
             page,
             "a[href*='/signup'], a[href*='/sign-up'], a:has-text('注册'), a:has-text('Sign Up')",
         ),
     }
 
 
-def classify_login_snapshot(snapshot: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+def classify_login_snapshot(
+    snapshot: Dict[str, Any],
+    has_login_session_cookie: bool = False,
+) -> Tuple[str, Optional[str]]:
     current_url = snapshot.get("url", "") or ""
     body_text = snapshot.get("body_text", "") or ""
     current_user_count = int(snapshot.get("current_user_count", 0) or 0)
     avatar_count = int(snapshot.get("avatar_count", 0) or 0)
+    user_menu_count = int(snapshot.get("user_menu_count", 0) or 0)
     login_button_count = int(snapshot.get("login_button_count", 0) or 0)
     login_link_count = int(snapshot.get("login_link_count", 0) or 0)
     register_link_count = int(snapshot.get("register_link_count", 0) or 0)
+    has_logged_in_ui = current_user_count > 0 or avatar_count > 0 or user_menu_count > 0
 
     if is_cloudflare_snapshot(snapshot):
         return "cf_challenge", "登录检测阶段遭遇 Cloudflare/风控页"
@@ -222,17 +397,75 @@ def classify_login_snapshot(snapshot: Dict[str, Any]) -> Tuple[str, Optional[str
     if "/login" in current_url or "/session/sso_provider" in current_url:
         return "login_page", "跳转到了登录页或 SSO 页面，Cookie 可能失效"
 
-    if current_user_count > 0 and login_button_count == 0 and login_link_count == 0:
+    if has_logged_in_ui and login_button_count == 0 and login_link_count == 0:
         return "ok", None
 
+    if has_login_session_cookie and login_button_count == 0 and login_link_count == 0 and register_link_count == 0:
+        return "ok", "检测到主站会话 Cookie，且页面未暴露匿名入口"
 
-    if login_link_count > 0 and register_link_count > 0:
-        return "cookie_invalid", "页面出现登录/注册链接，Cookie 可能失效"
+    if login_button_count > 0 or login_link_count > 0 or register_link_count > 0:
+        return "cookie_invalid", "页面出现匿名态控件，Cookie 可能失效"
 
-    if "登录" in body_text and "注册" in body_text and current_user_count == 0:
+    if "登录" in body_text and ("注册" in body_text or "欢迎回来" in body_text) and not has_logged_in_ui:
         return "cookie_invalid", "页面仍停留在匿名态，Cookie 可能失效"
 
     return "unknown_page", "未识别到稳定登录态，可能是风控、页面结构变化或 Cookie 不匹配"
+
+
+def classify_browser_login_entry(
+    snapshot: Dict[str, Any],
+    has_login_form: bool,
+) -> Tuple[str, Optional[str]]:
+    current_url = snapshot.get("url", "") or ""
+    body_text = snapshot.get("body_text", "") or ""
+    current_user_count = int(snapshot.get("current_user_count", 0) or 0)
+    avatar_count = int(snapshot.get("avatar_count", 0) or 0)
+    user_menu_count = int(snapshot.get("user_menu_count", 0) or 0)
+    login_button_count = int(snapshot.get("login_button_count", 0) or 0)
+    login_link_count = int(snapshot.get("login_link_count", 0) or 0)
+    register_link_count = int(snapshot.get("register_link_count", 0) or 0)
+    hcaptcha_modal_count = int(snapshot.get("hcaptcha_modal_count", 0) or 0)
+    hcaptcha_verify_button_count = int(snapshot.get("hcaptcha_verify_button_count", 0) or 0)
+    hcaptcha_checkbox_frame_count = int(snapshot.get("hcaptcha_checkbox_frame_count", 0) or 0)
+    hcaptcha_challenge_frame_count = int(snapshot.get("hcaptcha_challenge_frame_count", 0) or 0)
+
+    if is_cloudflare_snapshot(snapshot):
+        return "cf_challenge", "登录入口仍停留在 Cloudflare/风控页"
+
+    if is_rate_limited_snapshot(snapshot):
+        return "entry_blocked", "登录入口触发站点限流，暂时无法进入真实登录页"
+
+    if is_blocked_snapshot(snapshot):
+        return "entry_blocked", "登录入口仍被 403/拦截页阻断"
+
+    if (
+        hcaptcha_modal_count > 0
+        or hcaptcha_verify_button_count > 0
+        or hcaptcha_checkbox_frame_count > 0
+        or hcaptcha_challenge_frame_count > 0
+        or "人机验证" in body_text
+    ):
+        return "verification_required", "登录触发 hCaptcha 人机验证，当前尚未通过"
+
+    if has_login_form:
+        return "login_form_ready", None
+
+    if (current_user_count > 0 or avatar_count > 0 or user_menu_count > 0) and login_button_count == 0 and login_link_count == 0:
+        return "already_logged_in", None
+
+    if "/session/sso_provider" in current_url:
+        return "sso_page", "登录入口跳到了 SSO 页面，当前脚本未直接处理"
+
+    if "/login" in current_url:
+        return "login_page_pending", "已进入登录页，但账号密码表单尚未就绪"
+
+    if login_link_count > 0 or login_button_count > 0 or register_link_count > 0:
+        return "anonymous_home", "当前仍是匿名态首页，准备触发登录入口"
+
+    if "登录" in body_text and "注册" in body_text:
+        return "anonymous_home", "当前仍是匿名态页面，准备触发登录入口"
+
+    return "unknown", "未识别到真实登录表单，可能仍在风控页或入口未完成跳转"
 
 
 def is_linuxdo_topic_url(url: str) -> bool:
@@ -492,21 +725,153 @@ class LinuxDoBrowser:
             self.browser.context.add_cookies(payloads)
         return len(payloads)
 
+    def _browser_cookie_names(self) -> set[str]:
+        names: set[str] = set()
+        for cookie in self.browser.context.cookies():
+            name = str(cookie.get("name") or "").strip()
+            if name:
+                names.add(name)
+        return names
+
+    def _has_login_session_cookie(self) -> bool:
+        return "_t" in self._browser_cookie_names()
+
+    @staticmethod
+    def _find_frame(page: Any, *keywords: str) -> Any:
+        try:
+            frames = getattr(page, "frames", []) or []
+        except Exception:
+            return None
+
+        for frame in frames:
+            frame_url = str(getattr(frame, "url", "") or "")
+            if all(keyword in frame_url for keyword in keywords):
+                return frame
+        return None
+
+    def _has_human_verification_dialog(self, page: Any) -> bool:
+        selectors = HCAPTCHA_MODAL_SELECTORS + HCAPTCHA_VERIFY_BUTTON_SELECTORS + (
+            "#h-captcha-field iframe[title*='hCaptcha']",
+        )
+        return any(safe_visible_count(page, selector) > 0 for selector in selectors)
+
+    def _try_handle_hcaptcha_dialog(self, page: Any) -> bool:
+        if not self._has_human_verification_dialog(page):
+            return False
+
+        logger.warning("检测到登录 hCaptcha，尝试自动勾选复选框")
+        checkbox_frame = self._find_frame(page, "hcaptcha", "frame=checkbox")
+        if checkbox_frame is None:
+            logger.warning("未找到 hCaptcha 复选框 frame，无法继续自动验证")
+            return True
+
+        clicked = False
+        last_error = ""
+        for selector in ("#checkbox", "[role='checkbox']", "#anchor"):
+            try:
+                locator = checkbox_frame.locator(selector)
+                if locator.count() <= 0:
+                    continue
+                locator.first.click(timeout=8_000)
+                clicked = True
+                logger.info(f"已尝试点击 hCaptcha 复选框: {selector}")
+                break
+            except Exception as exc:
+                last_error = str(exc)
+
+        if not clicked:
+            if last_error:
+                logger.warning(f"hCaptcha 复选框点击失败: {last_error}")
+            return True
+
+        wait_page_ready(page, initial_delay_ms=4_000)
+        verify_button = first_matching_locator(page, HCAPTCHA_VERIFY_BUTTON_SELECTORS)
+        if verify_button is None:
+            return True
+
+        try:
+            is_enabled = verify_button.is_enabled()
+        except Exception:
+            is_enabled = True
+
+        if not is_enabled:
+            logger.warning("hCaptcha 验证按钮仍不可点击，可能进入了额外挑战")
+            return True
+
+        try:
+            verify_button.click()
+            logger.info("已尝试提交 hCaptcha 验证")
+        except Exception as exc:
+            logger.warning(f"提交 hCaptcha 验证失败: {str(exc)}")
+            return True
+
+        wait_page_ready(page, initial_delay_ms=4_000)
+        return True
+
+    def _extract_login_error_message(self, snapshot: Dict[str, Any]) -> str:
+        body_text = snapshot.get("body_text", "") or ""
+        patterns = (
+            r"(账号或密码错误[^。！？\n]*)",
+            r"(用户名或密码错误[^。！？\n]*)",
+            r"(密码错误[^。！？\n]*)",
+            r"(登录失败[^。！？\n]*)",
+            r"(Login failed[^.\n]*)",
+            r"(Invalid [^.\n]*login[^.\n]*)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, body_text, flags=re.IGNORECASE)
+            if match:
+                return normalize_text(match.group(1))
+        return ""
+
+    def _inspect_post_submit_login_state(self, page: Any) -> Tuple[str, str, Dict[str, Any]]:
+        wait_page_ready(page, initial_delay_ms=3_000)
+        self._try_handle_hcaptcha_dialog(page)
+        wait_page_ready(page, initial_delay_ms=2_000)
+        snapshot = collect_page_snapshot(
+            page,
+            include_auth_signals=True,
+            include_login_form_signals=True,
+        )
+        has_login_session_cookie = self._has_login_session_cookie()
+        status_code, reason = classify_login_snapshot(
+            snapshot,
+            has_login_session_cookie=has_login_session_cookie,
+        )
+        if status_code == "ok":
+            return "login_accepted", reason or "", snapshot
+
+        if self._has_human_verification_dialog(page):
+            return "verification_required", "登录流程触发人机验证，当前环境未完成验证", snapshot
+
+        error_message = self._extract_login_error_message(snapshot)
+        if error_message:
+            return "login_rejected", error_message, snapshot
+
+        current_url = snapshot.get("url", "") or ""
+        if "/login" in current_url and not has_login_session_cookie:
+            return "login_page_pending", "提交后仍停留在登录页，未拿到主站会话 Cookie", snapshot
+
+        return "unknown", reason or "提交后未识别到稳定登录态", snapshot
+
     def _fetch_page_snapshot(
         self,
         target_url: str,
         include_auth_signals: bool = False,
+        include_login_form_signals: bool = False,
         screenshot_path: Optional[str] = None,
         solve_cloudflare: Optional[bool] = None,
     ) -> Dict[str, Any]:
         snapshot: Dict[str, Any] = {}
 
         def action(page: Any) -> None:
-            snapshot["url"] = getattr(page, "url", "") or ""
-            snapshot["title"] = safe_title(page)
-            snapshot["body_text"] = safe_body_text(page)
-            if include_auth_signals:
-                snapshot.update(count_auth_controls(page))
+            snapshot.update(
+                collect_page_snapshot(
+                    page,
+                    include_auth_signals=include_auth_signals,
+                    include_login_form_signals=include_login_form_signals,
+                )
+            )
             if screenshot_path:
                 try:
                     page.screenshot(path=screenshot_path, full_page=True)
@@ -536,6 +901,24 @@ class LinuxDoBrowser:
         logger.error(f"{source_label} 登录验证失败: {reason}")
         logger.info(f"当前URL: {snapshot.get('url', '<unknown>') or '<unknown>'}")
         logger.info(f"页面标题: {snapshot.get('title', '<unknown>') or '<unknown>'}")
+        metric_keys = (
+            "current_user_count",
+            "avatar_count",
+            "user_menu_count",
+            "login_button_count",
+            "login_link_count",
+            "register_link_count",
+            "username_input_count",
+            "password_input_count",
+            "login_submit_count",
+            "hcaptcha_modal_count",
+            "hcaptcha_verify_button_count",
+            "hcaptcha_checkbox_frame_count",
+            "hcaptcha_challenge_frame_count",
+        )
+        metric_parts = [f"{key}={snapshot[key]}" for key in metric_keys if key in snapshot]
+        if metric_parts:
+            logger.info(f"页面信号: {', '.join(metric_parts)}")
         logger.info(
             "页面预览: "
             f"{(snapshot.get('body_text', '') or '')[:300] or '<empty>'}"
@@ -559,15 +942,22 @@ class LinuxDoBrowser:
                 break
 
             last_snapshot = snapshot
-            status_code, reason = classify_login_snapshot(snapshot)
+            has_login_session_cookie = self._has_login_session_cookie()
+            status_code, reason = classify_login_snapshot(
+                snapshot,
+                has_login_session_cookie=has_login_session_cookie,
+            )
             last_reason = reason or ""
             logger.info(
                 f"{source_label} 登录态探测[{attempt}/3]: status={status_code}, "
                 f"url={snapshot.get('url', '<unknown>')}, "
                 f"current_user={snapshot.get('current_user_count', 0)}, "
                 f"avatar={snapshot.get('avatar_count', 0)}, "
+                f"user_menu={snapshot.get('user_menu_count', 0)}, "
+                f"login_button={snapshot.get('login_button_count', 0)}, "
                 f"login_link={snapshot.get('login_link_count', 0)}, "
-                f"register_link={snapshot.get('register_link_count', 0)}"
+                f"register_link={snapshot.get('register_link_count', 0)}, "
+                f"has_t={int(has_login_session_cookie)}"
             )
 
             if status_code == "ok":
@@ -588,6 +978,7 @@ class LinuxDoBrowser:
             diagnostic_snapshot = self._fetch_page_snapshot(
                 last_snapshot.get("url") or HOME_URL,
                 include_auth_signals=True,
+                include_login_form_signals=True,
                 screenshot_path=LOGIN_FAILURE_SCREENSHOT,
             )
             if diagnostic_snapshot:
@@ -610,6 +1001,8 @@ class LinuxDoBrowser:
             logger.info(f"已预注入 {payload_count} 个 Cookie 到 Scrapling 浏览器上下文（含 connect 域 Cookie）")
         else:
             logger.info(f"已预注入 {payload_count} 个 Cookie 到 Scrapling 浏览器上下文")
+        if not self._has_login_session_cookie():
+            logger.warning("当前注入的主站 Cookie 未包含 _t，主站登录态大概率无法恢复")
         return self._validate_login_state("Cookie")
 
     def _login_via_http(self) -> bool:
@@ -671,6 +1064,8 @@ class LinuxDoBrowser:
         if resp_login.status_code != 200:
             logger.error(f"登录失败，状态码: {resp_login.status_code}")
             logger.error(resp_login.text)
+            if resp_login.status_code == 403 and "invalid_access" in resp_login.text:
+                logger.warning("站点当前拒绝 HTTP 直登接口，转入浏览器登录流程")
             return False
 
         response_json = resp_login.json() or {}
@@ -686,87 +1081,173 @@ class LinuxDoBrowser:
         logger.info("HTTP 登录不可用，尝试 Scrapling 浏览器登录...")
         self.session.cookies.clear()
         self.browser.context.clear_cookies()
+        last_snapshot: Dict[str, Any] = {}
+        last_reason = "未完成浏览器登录入口探测"
 
-        user_selectors = (
-            "#login-account-name",
-            "input[name='login']",
-            "input[type='email']",
-            "input[type='text']",
-        )
-        password_selectors = (
-            "#login-account-password",
-            "input[name='password']",
-            "input[type='password']",
-        )
-        button_selectors = (
-            "#login-button",
-            "button[type='submit']",
-            "button:has-text('登录')",
-            "button:has-text('Log In')",
-            "button:has-text('Sign In')",
-        )
+        for attempt in range(1, 4):
+            action_state: Dict[str, Any] = {
+                "snapshot": {},
+                "status": "unknown",
+                "reason": last_reason,
+            }
 
-        action_error = {"message": None}
+            def inspect_page(page: Any) -> Tuple[str, Optional[str], Any, Any, Any]:
+                snapshot = collect_page_snapshot(
+                    page,
+                    include_auth_signals=True,
+                    include_login_form_signals=True,
+                )
+                username_locator = first_matching_locator(page, LOGIN_USERNAME_SELECTORS)
+                password_locator = first_matching_locator(page, LOGIN_PASSWORD_SELECTORS)
+                login_button = first_matching_locator(page, LOGIN_SUBMIT_SELECTORS)
+                status_code, reason = classify_browser_login_entry(
+                    snapshot,
+                    username_locator is not None and password_locator is not None and login_button is not None,
+                )
+                action_state["snapshot"] = snapshot
+                action_state["status"] = status_code
+                action_state["reason"] = reason or ""
+                return status_code, reason, username_locator, password_locator, login_button
 
-        def action(page: Any) -> None:
-            page.wait_for_timeout(1_000)
+            def action(page: Any) -> None:
+                wait_page_ready(page, initial_delay_ms=1_000)
+                status_code, reason, username_locator, password_locator, login_button = inspect_page(page)
 
-            username_locator = None
-            for selector in user_selectors:
-                locator = page.locator(selector)
-                if locator.count() > 0:
-                    username_locator = locator.first
-                    break
+                if status_code == "cf_challenge":
+                    logger.info("检测到 Cloudflare 已解题，额外等待 15 秒观察是否切到真实登录页")
+                    wait_page_ready(page, initial_delay_ms=CF_POST_SOLVE_SETTLE_MS)
+                    status_code, reason, username_locator, password_locator, login_button = inspect_page(page)
 
-            password_locator = None
-            for selector in password_selectors:
-                locator = page.locator(selector)
-                if locator.count() > 0:
-                    password_locator = locator.first
-                    break
+                if status_code == "anonymous_home":
+                    login_entry = first_matching_locator(page, LOGIN_ENTRY_LINK_SELECTORS + LOGIN_ENTRY_BUTTON_SELECTORS)
+                    if login_entry is None:
+                        action_state["status"] = "unknown"
+                        action_state["reason"] = "匿名态页面未找到可点击的登录入口"
+                        return
+                    try:
+                        login_entry.click()
+                    except Exception as exc:
+                        action_state["status"] = "unknown"
+                        action_state["reason"] = f"点击登录入口失败: {str(exc)}"
+                        action_state["snapshot"] = collect_page_snapshot(
+                            page,
+                            include_auth_signals=True,
+                            include_login_form_signals=True,
+                        )
+                        return
 
-            login_button = None
-            for selector in button_selectors:
-                locator = page.locator(selector)
-                if locator.count() > 0:
-                    login_button = locator.first
-                    break
+                    wait_page_ready(page, initial_delay_ms=2_000)
+                    status_code, reason, username_locator, password_locator, login_button = inspect_page(page)
 
-            if username_locator is None or password_locator is None or login_button is None:
-                action_error["message"] = "登录页结构变化，未找到账号密码输入框或登录按钮"
-                return
+                    if status_code == "cf_challenge":
+                        logger.info("点击登录入口后仍在挑战页，额外等待 15 秒观察页面跳转")
+                        wait_page_ready(page, initial_delay_ms=CF_POST_SOLVE_SETTLE_MS)
+                        status_code, reason, username_locator, password_locator, login_button = inspect_page(page)
 
-            username_locator.fill(USERNAME or "")
-            password_locator.fill(PASSWORD or "")
-            login_button.click()
-            page.wait_for_timeout(5_000)
+                if status_code == "login_form_ready":
+                    try:
+                        username_locator.fill(USERNAME or "")
+                        password_locator.fill(PASSWORD or "")
+                        login_button.click()
+                    except Exception as exc:
+                        action_state["status"] = "unknown"
+                        action_state["reason"] = f"填写或提交登录表单失败: {str(exc)}"
+                        action_state["snapshot"] = collect_page_snapshot(
+                            page,
+                            include_auth_signals=True,
+                            include_login_form_signals=True,
+                        )
+                        return
+
+                    post_status, post_reason, post_snapshot = self._inspect_post_submit_login_state(page)
+                    action_state["snapshot"] = post_snapshot
+                    action_state["status"] = post_status
+                    action_state["reason"] = post_reason
+                    if post_status == "login_accepted":
+                        action_state["reason"] = post_reason or "浏览器登录已拿到主站会话"
+                    return
+
+                if status_code == "login_page_pending" and self._has_human_verification_dialog(page):
+                    action_state["snapshot"] = collect_page_snapshot(
+                        page,
+                        include_auth_signals=True,
+                        include_login_form_signals=True,
+                    )
+                    action_state["status"] = "verification_required"
+                    action_state["reason"] = "登录页需要额外人机验证，当前环境未完成验证"
+                    return
+
+                if status_code == "login_page_pending":
+                    action_state["reason"] = "已进入登录页，但账号密码表单仍未出现"
+                elif status_code == "unknown" and not reason:
+                    action_state["reason"] = "登录入口未进入可识别状态"
+
             try:
-                page.wait_for_load_state("domcontentloaded", timeout=10_000)
-            except Exception:
-                pass
-            try:
-                page.wait_for_load_state("networkidle", timeout=8_000)
-            except Exception:
-                pass
+                self.browser.fetch(
+                    LOGIN_URL,
+                    page_action=action,
+                    wait_selector="body",
+                    timeout=browser_timeout_ms(),
+                    google_search=False,
+                    load_dom=True,
+                )
+            except Exception as exc:
+                last_reason = f"浏览器登录流程异常: {str(exc)}"
+                logger.warning(f"浏览器登录入口探测[{attempt}/3]失败: {last_reason}")
+                if attempt < 3:
+                    wait_seconds(4, 6, "浏览器登录入口异常，等待后重试")
+                    continue
+                break
+
+            snapshot = action_state.get("snapshot") or {}
+            status_code = str(action_state.get("status") or "unknown")
+            reason = str(action_state.get("reason") or "")
+            last_snapshot = snapshot
+            last_reason = reason or f"浏览器登录入口状态={status_code}"
+            logger.info(
+                f"浏览器登录入口探测[{attempt}/3]: status={status_code}, "
+                f"url={snapshot.get('url', '<unknown>') or '<unknown>'}, "
+                f"title={snapshot.get('title', '<unknown>') or '<unknown>'}"
+            )
+            if reason:
+                logger.info(f"浏览器登录入口提示: {reason}")
+
+            if status_code in {"login_accepted", "already_logged_in"}:
+                return self._validate_login_state("账号密码-浏览器")
+
+            if status_code == "cf_challenge" and attempt < 3:
+                wait_seconds(4, 6, "登录入口仍在 Cloudflare/风控页，等待后重试")
+                continue
+
+            if status_code == "entry_blocked" and attempt < 3:
+                wait_seconds(6, 9, "登录入口仍被 403/限流页拦截，等待后重试")
+                continue
+
+            if status_code in {"verification_required", "login_rejected"}:
+                break
+
+            if status_code in {"anonymous_home", "login_page_pending", "unknown"} and attempt < 3:
+                wait_seconds(2, 4, "登录入口未就绪，等待后重试")
+                continue
+
+            break
 
         try:
-            self.browser.fetch(
-                LOGIN_URL,
-                page_action=action,
-                wait_selector="body",
-                timeout=browser_timeout_ms(),
-                google_search=False,
-                load_dom=True,
+            diagnostic_snapshot = self._fetch_page_snapshot(
+                last_snapshot.get("url") or HOME_URL,
+                include_auth_signals=True,
+                include_login_form_signals=True,
+                screenshot_path=LOGIN_FAILURE_SCREENSHOT,
             )
+            if diagnostic_snapshot:
+                last_snapshot = diagnostic_snapshot
         except Exception as exc:
-            logger.error(f"浏览器登录流程异常: {str(exc)}")
-            return False
+            logger.warning(f"补抓浏览器登录诊断页面失败: {str(exc)}")
 
-        if action_error["message"]:
-            logger.error(action_error["message"])
-            return False
-
-        return self._validate_login_state("账号密码-浏览器")
+        self._log_login_diagnostics("账号密码-浏览器入口", last_snapshot, last_reason)
+        if not COOKIES:
+            logger.info("如站点持续拦截账号密码登录，建议优先改用 LINUXDO_COOKIES")
+        return False
 
     def login(self) -> bool:
         if not USERNAME or not PASSWORD:
@@ -858,7 +1339,10 @@ class LinuxDoBrowser:
             "body_text": safe_body_text(self.page),
         }
         snapshot.update(count_auth_controls(self.page))
-        status_code, reason = classify_login_snapshot(snapshot)
+        status_code, reason = classify_login_snapshot(
+            snapshot,
+            has_login_session_cookie=self._has_login_session_cookie(),
+        )
         return status_code, reason, snapshot
 
     def click_topic(self, deadline_ts: float) -> bool:
