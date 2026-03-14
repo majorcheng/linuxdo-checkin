@@ -22,35 +22,25 @@
 - 每天在`GitHub Actions`中自动运行。
 - 支持`青龙面板` 和 `Github Actions` 自动运行。
 - 当前运行栈基于`Scrapling`，不再依赖`DrissionPage`。
-- (可选)`Telegram`通知功能，推送获取签到结果（目前只支持GitHub Actions方式）。
+- (可选)`Telegram`通知功能，推送获取签到结果，失败时也会通知（目前只支持GitHub Actions方式）。
 - (可选)`Gotify`通知功能，推送获取签到结果。
 - (可选)`Server酱³`通知功能，推送获取签到结果。
 - (可选)`wxpush`通知功能，推送获取签到结果。
 ## 环境变量配置
 
-### 登录方式（二选一）
+### 登录方式
 
-**方式一：Cookie 登录（优先）**
+**Cookie 登录**
 
 | 环境变量名称             | 描述                                         | 示例值                          |
 |--------------------|--------------------------------------------|------------------------------|
-| `LINUXDO_COOKIES`  | 从浏览器 DevTools 复制的主站 Cookie 字符串，设置后优先使用，无需账号密码 | `_t=xxx; _forum_session=yyy` |
+| `LINUXDO_COOKIES`  | 从浏览器 DevTools 复制的主站 Cookie 字符串 | `_t=xxx; _forum_session=yyy` |
+| `LINUXDO_LOGIN_CURL` | 可选，直接粘贴浏览器抓到的完整 curl 命令，脚本会自动提取 Cookie 和请求头 | `curl ... -b "_t=xxx" ...` |
 
 > 获取方式：打开 [linux.do](https://linux.do/) 并登录 → 按 F12 → Application → Cookies → `https://linux.do` → 全选所有 Cookie 复制为字符串粘贴即可。
 >
 > 如需让脚本同时读取 `connect.linux.do` 的登录态，可额外配置可选变量 `LINUXDO_CONNECT_COOKIES`，把 `https://connect.linux.do` 下的 Cookie 单独传入。这个变量适合补充 `auth.session-token`、`linux_do_credit_session_id`、`__stripe_sid` 这类 Connect 域专属 Cookie。
 > `connect.linux.do` 检查默认**不参与主流程**；只有在设置 `LINUXDO_CONNECT_INFO_ENABLED=true` 时，才会额外输出 Connect 调试信息。
-
-**方式二：账号密码登录**
-
-| 环境变量名称             | 描述                | 示例值                                |
-|--------------------|-------------------|------------------------------------|
-| `LINUXDO_USERNAME` | 你的 LinuxDo 用户名或邮箱 | `your_username` 或 `your@email.com` |
-| `LINUXDO_PASSWORD` | 你的 LinuxDo 密码     | `your_password`                    |
-
-> 若同时设置了 `LINUXDO_COOKIES` 和账号密码，**Cookie 登录优先**；Cookie 失效时自动回退到账号密码登录。
-
-~~之前的USERNAME和PASSWORD环境变量仍然可用，但建议使用新的环境变量~~
 
 ### 可选变量
 
@@ -90,9 +80,9 @@
 
 1. **设置环境变量**：
     - 在 GitHub 仓库的 `Settings` -> `Secrets and variables` -> `Actions` 中添加以下变量：
-        - （二选一）`LINUXDO_COOKIES`：从浏览器复制的主站 Cookie 字符串（**推荐，优先使用**）。
+        - `LINUXDO_COOKIES`：从浏览器复制的主站 Cookie 字符串。
+        - (可选) `LINUXDO_LOGIN_CURL`：浏览器抓到的完整 curl 命令，脚本会自动提取 Cookie 和请求头。
         - (可选) `LINUXDO_CONNECT_COOKIES`：从 `https://connect.linux.do` 复制的附加 Cookie 字符串，用于补充 Connect 域专属 Cookie。
-        - （二选一）`LINUXDO_USERNAME` + `LINUXDO_PASSWORD`：你的 LinuxDo 用户名/邮箱和密码。
         - (可选) `BROWSE_ENABLED`：是否启用浏览帖子，`true` 或 `false`，默认为 `true`。
         - (可选) `LINUXDO_PROXY_URL`：代理地址，支持 `http://` / `https://` / 账号密码代理。
         - (可选) `LINUXDO_PROXY_INSECURE`：设为 `true` 时，仅跳过连接上游 HTTPS 代理这一跳的证书校验。
@@ -156,10 +146,9 @@
 3. **配置环境变量**
     - 进入青龙面板 -> 环境变量 -> 创建变量
     - 需要配置以下变量：
-        - （二选一）`LINUXDO_COOKIES`：从浏览器复制的主站 Cookie 字符串（**推荐，优先使用**）
+        - `LINUXDO_COOKIES`：从浏览器复制的主站 Cookie 字符串
+        - (可选) `LINUXDO_LOGIN_CURL`：浏览器抓到的完整 curl 命令，脚本会自动提取 Cookie 和请求头
         - (可选) `LINUXDO_CONNECT_COOKIES`：从 `https://connect.linux.do` 复制的附加 Cookie 字符串，用于补充 Connect 域专属 Cookie
-        - （二选一）`LINUXDO_USERNAME`：你的LinuxDo用户名/邮箱
-        - （二选一）`LINUXDO_PASSWORD`：你的LinuxDo密码
         - (可选) `BROWSE_ENABLED`：是否启用浏览帖子功能，`true` 或 `false`，默认为 `true`
         - (可选) `LINUXDO_PROXY_URL`：代理地址，支持 `http://` / `https://` / 账号密码代理
         - (可选) `LINUXDO_PROXY_INSECURE`：设为 `true` 时，仅跳过连接上游 HTTPS 代理这一跳的证书校验
@@ -197,7 +186,7 @@
 
 ### Telegram 通知
 
-可选功能：配置 Telegram 通知，实时获取签到结果。
+可选功能：配置 Telegram 通知，实时获取成功和失败结果。
 
 需要在 GitHub Secrets 中配置：
 - `TELEGRAM_BOT_TOKEN`：Telegram Bot Token
@@ -207,7 +196,7 @@
 1. Bot Token：与 [@BotFather](https://t.me/BotFather) 对话创建机器人获取
 2. 用户 ID：与 [@userinfobot](https://t.me/userinfobot) 对话获取
 
-未配置时将自动跳过通知功能，不影响签到。
+未配置时将自动跳过 Telegram 通知，不影响签到。
 
 
 ## 自动更新
@@ -215,4 +204,3 @@
 - **Github Actions**：默认状态下自动更新是关闭的，[点击此处](https://github.com/ChatGPTNextWeb/ChatGPT-Next-Web/blob/main/README_CN.md#%E6%89%93%E5%BC%80%E8%87%AA%E5%8A%A8%E6%9B%B4%E6%96%B0)
 查看打开自动更新步骤。
 - **青龙面板**：更新是以仓库设置的定时规则有关，按照本文配置，则是每天0点更新一次。
-

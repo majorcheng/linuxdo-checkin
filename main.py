@@ -139,8 +139,6 @@ def resolve_cookie_source_profile(
     return CapturedRequestProfile(), raw_cookie_text
 
 
-USERNAME = os.environ.get("LINUXDO_USERNAME") or os.environ.get("USERNAME")
-PASSWORD = os.environ.get("LINUXDO_PASSWORD") or os.environ.get("PASSWORD")
 RAW_COOKIE_INPUT = os.environ.get("LINUXDO_COOKIES", "").strip()
 RAW_LOGIN_CURL = os.environ.get("LINUXDO_LOGIN_CURL", "").strip()
 CAPTURED_REQUEST_PROFILE, COOKIES = resolve_cookie_source_profile(
@@ -172,14 +170,10 @@ CONNECT_INFO_ENABLED = os.environ.get("LINUXDO_CONNECT_INFO_ENABLED", "false").s
 ]
 
 HOME_URL = "https://linux.do/"
-LOGIN_URL = "https://linux.do/login"
-SESSION_URL = "https://linux.do/session"
-CSRF_URL = "https://linux.do/session/csrf"
 CONNECT_URL = "https://connect.linux.do/"
 MIN_ONLINE_SECONDS = 10 * 60
 SCRAPLING_TIMEOUT_MS = 60_000
 LOGIN_FAILURE_SCREENSHOT = "login_check_failed.png"
-CF_POST_SOLVE_SETTLE_MS = 15_000
 
 SHARED_DOMAIN_COOKIE_NAMES = {
     "cf_clearance",
@@ -226,50 +220,11 @@ LOGIN_ENTRY_BUTTON_SELECTORS = (
     "button:has-text('Log In')",
     "button:has-text('Sign In')",
 )
-LOGIN_USERNAME_SELECTORS = (
-    "#login-account-name",
-    "#signin_username",
-    "input[name='login']",
-    "input[name='username']",
-    "input[type='email']",
-    "input[type='text']",
-)
-LOGIN_PASSWORD_SELECTORS = (
-    "#login-account-password",
-    "#signin_password",
-    "input[name='password']",
-    "input[type='password']",
-)
-LOGIN_SUBMIT_SELECTORS = (
-    "#login-button",
-    "#signin-button",
-    "button[type='submit']",
-    "button:has-text('登录')",
-    "button:has-text('Log In')",
-    "button:has-text('Sign In')",
-)
 LOGGED_IN_USER_SELECTORS = (
     "#current-user",
     ".header-dropdown-toggle.current-user",
     ".current-user",
     "[data-identifier='user-menu']",
-)
-HCAPTCHA_MODAL_SELECTORS = (
-    ".hcaptcha-verify-modal",
-    "#h-captcha-field",
-)
-HCAPTCHA_VERIFY_BUTTON_SELECTORS = (
-    ".hcaptcha-verify-modal .btn.btn-primary",
-    "button:has-text('验证')",
-)
-BLOCKED_TITLES = (
-    "Access denied",
-    "Sorry, you have been blocked",
-)
-BLOCKED_KEYWORDS = (
-    "Error code 1020",
-    "Access denied",
-    "Sorry, you have been blocked",
 )
 
 
@@ -347,24 +302,6 @@ def safe_visible_count(page: Any, selector: str) -> int:
     return visible_count
 
 
-def first_matching_locator(page: Any, selectors: Tuple[str, ...]) -> Any:
-    for selector in selectors:
-        try:
-            locator = page.locator(selector)
-            count = locator.count()
-        except Exception:
-            continue
-
-        for index in range(count):
-            candidate = locator.nth(index)
-            try:
-                if candidate.is_visible():
-                    return candidate
-            except Exception:
-                continue
-    return None
-
-
 def build_page_snapshot(page: Any, include_auth_signals: bool = False) -> Dict[str, Any]:
     snapshot: Dict[str, Any] = {
         "url": getattr(page, "url", "") or "",
@@ -376,58 +313,11 @@ def build_page_snapshot(page: Any, include_auth_signals: bool = False) -> Dict[s
     return snapshot
 
 
-def count_login_form_controls(page: Any) -> Dict[str, int]:
-    return {
-        "username_input_count": safe_visible_count(page, ", ".join(LOGIN_USERNAME_SELECTORS)),
-        "password_input_count": safe_visible_count(page, ", ".join(LOGIN_PASSWORD_SELECTORS)),
-        "login_submit_count": safe_visible_count(page, ", ".join(LOGIN_SUBMIT_SELECTORS)),
-        "hcaptcha_modal_count": safe_visible_count(page, ", ".join(HCAPTCHA_MODAL_SELECTORS)),
-        "hcaptcha_verify_button_count": safe_visible_count(page, ", ".join(HCAPTCHA_VERIFY_BUTTON_SELECTORS)),
-        "hcaptcha_checkbox_frame_count": safe_visible_count(
-            page,
-            "iframe[src*='hcaptcha'][src*='frame=checkbox']",
-        ),
-        "hcaptcha_challenge_frame_count": safe_visible_count(
-            page,
-            "iframe[src*='hcaptcha'][src*='frame=challenge']",
-        ),
-    }
-
-
 def collect_page_snapshot(
     page: Any,
     include_auth_signals: bool = False,
-    include_login_form_signals: bool = False,
 ) -> Dict[str, Any]:
-    snapshot = build_page_snapshot(page, include_auth_signals=include_auth_signals)
-    if include_login_form_signals:
-        snapshot.update(count_login_form_controls(page))
-    return snapshot
-
-
-def find_first_locator(page: Any, selectors: Tuple[str, ...]) -> Any:
-    for selector in selectors:
-        try:
-            locator = page.locator(selector)
-            if locator.count() > 0:
-                return locator.first
-        except Exception:
-            continue
-    return None
-
-
-def wait_page_ready(page: Any, initial_delay_ms: int = 0) -> None:
-    if initial_delay_ms > 0:
-        try:
-            page.wait_for_timeout(initial_delay_ms)
-        except Exception:
-            time.sleep(initial_delay_ms / 1000)
-
-    for state_name, timeout_ms in (("domcontentloaded", 10_000), ("networkidle", 8_000)):
-        try:
-            page.wait_for_load_state(state_name, timeout=timeout_ms)
-        except Exception:
-            continue
+    return build_page_snapshot(page, include_auth_signals=include_auth_signals)
 
 
 def is_cloudflare_snapshot(snapshot: Dict[str, Any]) -> bool:
@@ -444,14 +334,6 @@ def is_rate_limited_snapshot(snapshot: Dict[str, Any]) -> bool:
     if any(keyword in title for keyword in RATE_LIMIT_TITLES):
         return True
     return any(keyword in body_text for keyword in RATE_LIMIT_KEYWORDS)
-
-
-def is_blocked_snapshot(snapshot: Dict[str, Any]) -> bool:
-    title = snapshot.get("title", "") or ""
-    body_text = snapshot.get("body_text", "") or ""
-    if any(keyword in title for keyword in BLOCKED_TITLES):
-        return True
-    return any(keyword in body_text for keyword in BLOCKED_KEYWORDS)
 
 
 def wait_seconds(min_seconds: float, max_seconds: float, label: str) -> float:
@@ -529,62 +411,6 @@ def classify_login_snapshot(
     return "unknown_page", "未识别到稳定登录态，可能是风控、页面结构变化或 Cookie 不匹配"
 
 
-def classify_browser_login_entry(
-    snapshot: Dict[str, Any],
-    has_login_form: bool,
-) -> Tuple[str, Optional[str]]:
-    current_url = snapshot.get("url", "") or ""
-    body_text = snapshot.get("body_text", "") or ""
-    current_user_count = int(snapshot.get("current_user_count", 0) or 0)
-    avatar_count = int(snapshot.get("avatar_count", 0) or 0)
-    user_menu_count = int(snapshot.get("user_menu_count", 0) or 0)
-    login_button_count = int(snapshot.get("login_button_count", 0) or 0)
-    login_link_count = int(snapshot.get("login_link_count", 0) or 0)
-    register_link_count = int(snapshot.get("register_link_count", 0) or 0)
-    hcaptcha_modal_count = int(snapshot.get("hcaptcha_modal_count", 0) or 0)
-    hcaptcha_verify_button_count = int(snapshot.get("hcaptcha_verify_button_count", 0) or 0)
-    hcaptcha_checkbox_frame_count = int(snapshot.get("hcaptcha_checkbox_frame_count", 0) or 0)
-    hcaptcha_challenge_frame_count = int(snapshot.get("hcaptcha_challenge_frame_count", 0) or 0)
-
-    if is_cloudflare_snapshot(snapshot):
-        return "cf_challenge", "登录入口仍停留在 Cloudflare/风控页"
-
-    if is_rate_limited_snapshot(snapshot):
-        return "entry_blocked", "登录入口触发站点限流，暂时无法进入真实登录页"
-
-    if is_blocked_snapshot(snapshot):
-        return "entry_blocked", "登录入口仍被 403/拦截页阻断"
-
-    if (
-        hcaptcha_modal_count > 0
-        or hcaptcha_verify_button_count > 0
-        or hcaptcha_checkbox_frame_count > 0
-        or hcaptcha_challenge_frame_count > 0
-        or "人机验证" in body_text
-    ):
-        return "verification_required", "登录触发 hCaptcha 人机验证，当前尚未通过"
-
-    if has_login_form:
-        return "login_form_ready", None
-
-    if current_user_count > 0 or avatar_count > 0 or user_menu_count > 0:
-        return "already_logged_in", None
-
-    if "/session/sso_provider" in current_url:
-        return "sso_page", "登录入口跳到了 SSO 页面，当前脚本未直接处理"
-
-    if "/login" in current_url:
-        return "login_page_pending", "已进入登录页，但账号密码表单尚未就绪"
-
-    if login_link_count > 0 or login_button_count > 0 or register_link_count > 0:
-        return "anonymous_home", "当前仍是匿名态首页，准备触发登录入口"
-
-    if "登录" in body_text and "注册" in body_text:
-        return "anonymous_home", "当前仍是匿名态页面，准备触发登录入口"
-
-    return "unknown", "未识别到真实登录表单，可能仍在风控页或入口未完成跳转"
-
-
 def is_linuxdo_topic_url(url: str) -> bool:
     if not url:
         return False
@@ -636,6 +462,7 @@ class LinuxDoBrowser:
         self.browser = None
         self.page = None
         self.notifier = NotificationManager()
+        self.last_failure_reason = ""
         self.captured_request_profile = CAPTURED_REQUEST_PROFILE
         self.browser_useragent = self.captured_request_profile.useragent or DEFAULT_USER_AGENT
         self.browser_extra_headers: Dict[str, str] = {}
@@ -944,129 +771,10 @@ class LinuxDoBrowser:
     def _has_login_session_cookie(self) -> bool:
         return "_t" in self._browser_cookie_names()
 
-    @staticmethod
-    def _find_frame(page: Any, *keywords: str) -> Any:
-        try:
-            frames = getattr(page, "frames", []) or []
-        except Exception:
-            return None
-
-        for frame in frames:
-            frame_url = str(getattr(frame, "url", "") or "")
-            if all(keyword in frame_url for keyword in keywords):
-                return frame
-        return None
-
-    def _has_human_verification_dialog(self, page: Any) -> bool:
-        selectors = HCAPTCHA_MODAL_SELECTORS + HCAPTCHA_VERIFY_BUTTON_SELECTORS + (
-            "#h-captcha-field iframe[title*='hCaptcha']",
-        )
-        return any(safe_visible_count(page, selector) > 0 for selector in selectors)
-
-    def _try_handle_hcaptcha_dialog(self, page: Any) -> bool:
-        if not self._has_human_verification_dialog(page):
-            return False
-
-        logger.warning("检测到登录 hCaptcha，尝试自动勾选复选框")
-        checkbox_frame = self._find_frame(page, "hcaptcha", "frame=checkbox")
-        if checkbox_frame is None:
-            logger.warning("未找到 hCaptcha 复选框 frame，无法继续自动验证")
-            return True
-
-        clicked = False
-        last_error = ""
-        for selector in ("#checkbox", "[role='checkbox']", "#anchor"):
-            try:
-                locator = checkbox_frame.locator(selector)
-                if locator.count() <= 0:
-                    continue
-                locator.first.click(timeout=8_000)
-                clicked = True
-                logger.info(f"已尝试点击 hCaptcha 复选框: {selector}")
-                break
-            except Exception as exc:
-                last_error = str(exc)
-
-        if not clicked:
-            if last_error:
-                logger.warning(f"hCaptcha 复选框点击失败: {last_error}")
-            return True
-
-        wait_page_ready(page, initial_delay_ms=4_000)
-        verify_button = first_matching_locator(page, HCAPTCHA_VERIFY_BUTTON_SELECTORS)
-        if verify_button is None:
-            return True
-
-        try:
-            is_enabled = verify_button.is_enabled()
-        except Exception:
-            is_enabled = True
-
-        if not is_enabled:
-            logger.warning("hCaptcha 验证按钮仍不可点击，可能进入了额外挑战")
-            return True
-
-        try:
-            verify_button.click()
-            logger.info("已尝试提交 hCaptcha 验证")
-        except Exception as exc:
-            logger.warning(f"提交 hCaptcha 验证失败: {str(exc)}")
-            return True
-
-        wait_page_ready(page, initial_delay_ms=4_000)
-        return True
-
-    def _extract_login_error_message(self, snapshot: Dict[str, Any]) -> str:
-        body_text = snapshot.get("body_text", "") or ""
-        patterns = (
-            r"(账号或密码错误[^。！？\n]*)",
-            r"(用户名或密码错误[^。！？\n]*)",
-            r"(密码错误[^。！？\n]*)",
-            r"(登录失败[^。！？\n]*)",
-            r"(Login failed[^.\n]*)",
-            r"(Invalid [^.\n]*login[^.\n]*)",
-        )
-        for pattern in patterns:
-            match = re.search(pattern, body_text, flags=re.IGNORECASE)
-            if match:
-                return normalize_text(match.group(1))
-        return ""
-
-    def _inspect_post_submit_login_state(self, page: Any) -> Tuple[str, str, Dict[str, Any]]:
-        wait_page_ready(page, initial_delay_ms=3_000)
-        self._try_handle_hcaptcha_dialog(page)
-        wait_page_ready(page, initial_delay_ms=2_000)
-        snapshot = collect_page_snapshot(
-            page,
-            include_auth_signals=True,
-            include_login_form_signals=True,
-        )
-        has_login_session_cookie = self._has_login_session_cookie()
-        status_code, reason = classify_login_snapshot(
-            snapshot,
-            has_login_session_cookie=has_login_session_cookie,
-        )
-        if status_code == "ok":
-            return "login_accepted", reason or "", snapshot
-
-        if self._has_human_verification_dialog(page):
-            return "verification_required", "登录流程触发人机验证，当前环境未完成验证", snapshot
-
-        error_message = self._extract_login_error_message(snapshot)
-        if error_message:
-            return "login_rejected", error_message, snapshot
-
-        current_url = snapshot.get("url", "") or ""
-        if "/login" in current_url and not has_login_session_cookie:
-            return "login_page_pending", "提交后仍停留在登录页，未拿到主站会话 Cookie", snapshot
-
-        return "unknown", reason or "提交后未识别到稳定登录态", snapshot
-
     def _fetch_page_snapshot(
         self,
         target_url: str,
         include_auth_signals: bool = False,
-        include_login_form_signals: bool = False,
         screenshot_path: Optional[str] = None,
         solve_cloudflare: Optional[bool] = None,
     ) -> Dict[str, Any]:
@@ -1077,7 +785,6 @@ class LinuxDoBrowser:
                 collect_page_snapshot(
                     page,
                     include_auth_signals=include_auth_signals,
-                    include_login_form_signals=include_login_form_signals,
                 )
             )
             if screenshot_path:
@@ -1105,6 +812,11 @@ class LinuxDoBrowser:
             self.browser.fetch(target_url, **fetch_kwargs)
         return snapshot
 
+    def _remember_failure(self, reason: str) -> None:
+        normalized_reason = normalize_text(reason)
+        if normalized_reason:
+            self.last_failure_reason = normalized_reason
+
     def _log_login_diagnostics(self, source_label: str, snapshot: Dict[str, Any], reason: str) -> None:
         logger.error(f"{source_label} 登录验证失败: {reason}")
         logger.info(f"当前URL: {snapshot.get('url', '<unknown>') or '<unknown>'}")
@@ -1116,13 +828,6 @@ class LinuxDoBrowser:
             "login_button_count",
             "login_link_count",
             "register_link_count",
-            "username_input_count",
-            "password_input_count",
-            "login_submit_count",
-            "hcaptcha_modal_count",
-            "hcaptcha_verify_button_count",
-            "hcaptcha_checkbox_frame_count",
-            "hcaptcha_challenge_frame_count",
         )
         metric_parts = [f"{key}={snapshot[key]}" for key in metric_keys if key in snapshot]
         if metric_parts:
@@ -1186,7 +891,6 @@ class LinuxDoBrowser:
             diagnostic_snapshot = self._fetch_page_snapshot(
                 last_snapshot.get("url") or HOME_URL,
                 include_auth_signals=True,
-                include_login_form_signals=True,
                 screenshot_path=LOGIN_FAILURE_SCREENSHOT,
             )
             if diagnostic_snapshot:
@@ -1194,6 +898,7 @@ class LinuxDoBrowser:
         except Exception as exc:
             logger.warning(f"补抓登录诊断页面失败: {str(exc)}")
 
+        self._remember_failure(f"{source_label} 登录验证失败: {last_reason}")
         self._log_login_diagnostics(source_label, last_snapshot, last_reason)
         return False
 
@@ -1202,6 +907,7 @@ class LinuxDoBrowser:
         self.session.cookies.clear()
         payload_count = self._seed_session_cookies(cookie_str, CONNECT_COOKIES)
         if payload_count <= 0:
+            self._remember_failure("Cookie 解析失败或为空")
             logger.error("Cookie 解析失败或为空，无法使用 Cookie 登录")
             return False
 
@@ -1217,260 +923,6 @@ class LinuxDoBrowser:
         if not self._has_login_session_cookie():
             logger.warning("当前注入的主站 Cookie 未包含 _t，主站登录态大概率无法恢复")
         return self._validate_login_state("Cookie")
-
-    def _login_via_http(self) -> bool:
-        logger.info("尝试通过 HTTP 登录接口获取会话...")
-        headers = {
-            "User-Agent": self.session.headers["User-Agent"],
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": LOGIN_URL,
-        }
-
-        try:
-            resp_csrf = self.session.get(
-                CSRF_URL,
-                headers=headers,
-                impersonate="chrome136",
-                **self.request_kwargs,
-            )
-        except Exception as exc:
-            logger.error(f"获取 CSRF token 异常: {str(exc)}")
-            return False
-
-        if resp_csrf.status_code != 200:
-            logger.error(f"获取 CSRF token 失败: {resp_csrf.status_code}")
-            return False
-
-        csrf_token = (resp_csrf.json() or {}).get("csrf")
-        if not csrf_token:
-            logger.error("CSRF 响应缺少 csrf 字段")
-            return False
-
-        headers.update(
-            {
-                "X-CSRF-Token": csrf_token,
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Origin": "https://linux.do",
-            }
-        )
-        data = {
-            "login": USERNAME,
-            "password": PASSWORD,
-            "second_factor_method": "1",
-            "timezone": "Asia/Shanghai",
-        }
-
-        try:
-            resp_login = self.session.post(
-                SESSION_URL,
-                data=data,
-                headers=headers,
-                impersonate="chrome136",
-                **self.request_kwargs,
-            )
-        except Exception as exc:
-            logger.error(f"登录请求异常: {str(exc)}")
-            return False
-
-        if resp_login.status_code != 200:
-            logger.error(f"登录失败，状态码: {resp_login.status_code}")
-            logger.error(resp_login.text)
-            if resp_login.status_code == 403 and "invalid_access" in resp_login.text:
-                logger.warning("站点当前拒绝 HTTP 直登接口，转入浏览器登录流程")
-            return False
-
-        response_json = resp_login.json() or {}
-        if response_json.get("error"):
-            logger.error(f"登录失败: {response_json.get('error')}")
-            return False
-
-        payload_count = self._sync_session_cookies_to_browser()
-        logger.info(f"HTTP 登录成功，已同步 {payload_count} 个 Cookie 到浏览器上下文")
-        return self._validate_login_state("账号密码-HTTP")
-
-    def _browser_login(self) -> bool:
-        logger.info("HTTP 登录不可用，尝试 Scrapling 浏览器登录...")
-        self.session.cookies.clear()
-        self.browser.context.clear_cookies()
-        last_snapshot: Dict[str, Any] = {}
-        last_reason = "未完成浏览器登录入口探测"
-
-        for attempt in range(1, 4):
-            action_state: Dict[str, Any] = {
-                "snapshot": {},
-                "status": "unknown",
-                "reason": last_reason,
-            }
-
-            def inspect_page(page: Any) -> Tuple[str, Optional[str], Any, Any, Any]:
-                snapshot = collect_page_snapshot(
-                    page,
-                    include_auth_signals=True,
-                    include_login_form_signals=True,
-                )
-                username_locator = first_matching_locator(page, LOGIN_USERNAME_SELECTORS)
-                password_locator = first_matching_locator(page, LOGIN_PASSWORD_SELECTORS)
-                login_button = first_matching_locator(page, LOGIN_SUBMIT_SELECTORS)
-                status_code, reason = classify_browser_login_entry(
-                    snapshot,
-                    username_locator is not None and password_locator is not None and login_button is not None,
-                )
-                action_state["snapshot"] = snapshot
-                action_state["status"] = status_code
-                action_state["reason"] = reason or ""
-                return status_code, reason, username_locator, password_locator, login_button
-
-            def action(page: Any) -> None:
-                wait_page_ready(page, initial_delay_ms=1_000)
-                status_code, reason, username_locator, password_locator, login_button = inspect_page(page)
-
-                if status_code == "cf_challenge":
-                    logger.info("检测到 Cloudflare 已解题，额外等待 15 秒观察是否切到真实登录页")
-                    wait_page_ready(page, initial_delay_ms=CF_POST_SOLVE_SETTLE_MS)
-                    status_code, reason, username_locator, password_locator, login_button = inspect_page(page)
-
-                if status_code == "anonymous_home":
-                    login_entry = first_matching_locator(page, LOGIN_ENTRY_LINK_SELECTORS + LOGIN_ENTRY_BUTTON_SELECTORS)
-                    if login_entry is None:
-                        action_state["status"] = "unknown"
-                        action_state["reason"] = "匿名态页面未找到可点击的登录入口"
-                        return
-                    try:
-                        login_entry.click()
-                    except Exception as exc:
-                        action_state["status"] = "unknown"
-                        action_state["reason"] = f"点击登录入口失败: {str(exc)}"
-                        action_state["snapshot"] = collect_page_snapshot(
-                            page,
-                            include_auth_signals=True,
-                            include_login_form_signals=True,
-                        )
-                        return
-
-                    wait_page_ready(page, initial_delay_ms=2_000)
-                    status_code, reason, username_locator, password_locator, login_button = inspect_page(page)
-
-                    if status_code == "cf_challenge":
-                        logger.info("点击登录入口后仍在挑战页，额外等待 15 秒观察页面跳转")
-                        wait_page_ready(page, initial_delay_ms=CF_POST_SOLVE_SETTLE_MS)
-                        status_code, reason, username_locator, password_locator, login_button = inspect_page(page)
-
-                if status_code == "login_form_ready":
-                    try:
-                        username_locator.fill(USERNAME or "")
-                        password_locator.fill(PASSWORD or "")
-                        login_button.click()
-                    except Exception as exc:
-                        action_state["status"] = "unknown"
-                        action_state["reason"] = f"填写或提交登录表单失败: {str(exc)}"
-                        action_state["snapshot"] = collect_page_snapshot(
-                            page,
-                            include_auth_signals=True,
-                            include_login_form_signals=True,
-                        )
-                        return
-
-                    post_status, post_reason, post_snapshot = self._inspect_post_submit_login_state(page)
-                    action_state["snapshot"] = post_snapshot
-                    action_state["status"] = post_status
-                    action_state["reason"] = post_reason
-                    if post_status == "login_accepted":
-                        action_state["reason"] = post_reason or "浏览器登录已拿到主站会话"
-                    return
-
-                if status_code == "login_page_pending" and self._has_human_verification_dialog(page):
-                    action_state["snapshot"] = collect_page_snapshot(
-                        page,
-                        include_auth_signals=True,
-                        include_login_form_signals=True,
-                    )
-                    action_state["status"] = "verification_required"
-                    action_state["reason"] = "登录页需要额外人机验证，当前环境未完成验证"
-                    return
-
-                if status_code == "login_page_pending":
-                    action_state["reason"] = "已进入登录页，但账号密码表单仍未出现"
-                elif status_code == "unknown" and not reason:
-                    action_state["reason"] = "登录入口未进入可识别状态"
-
-            try:
-                self.browser.fetch(
-                    LOGIN_URL,
-                    page_action=action,
-                    wait_selector="body",
-                    timeout=browser_timeout_ms(),
-                    google_search=False,
-                    load_dom=True,
-                )
-            except Exception as exc:
-                last_reason = f"浏览器登录流程异常: {str(exc)}"
-                logger.warning(f"浏览器登录入口探测[{attempt}/3]失败: {last_reason}")
-                if attempt < 3:
-                    wait_seconds(4, 6, "浏览器登录入口异常，等待后重试")
-                    continue
-                break
-
-            snapshot = action_state.get("snapshot") or {}
-            status_code = str(action_state.get("status") or "unknown")
-            reason = str(action_state.get("reason") or "")
-            last_snapshot = snapshot
-            last_reason = reason or f"浏览器登录入口状态={status_code}"
-            logger.info(
-                f"浏览器登录入口探测[{attempt}/3]: status={status_code}, "
-                f"url={snapshot.get('url', '<unknown>') or '<unknown>'}, "
-                f"title={snapshot.get('title', '<unknown>') or '<unknown>'}"
-            )
-            if reason:
-                logger.info(f"浏览器登录入口提示: {reason}")
-
-            if status_code in {"login_accepted", "already_logged_in"}:
-                return self._validate_login_state("账号密码-浏览器")
-
-            if status_code == "cf_challenge" and attempt < 3:
-                wait_seconds(4, 6, "登录入口仍在 Cloudflare/风控页，等待后重试")
-                continue
-
-            if status_code == "entry_blocked" and attempt < 3:
-                wait_seconds(6, 9, "登录入口仍被 403/限流页拦截，等待后重试")
-                continue
-
-            if status_code in {"verification_required", "login_rejected"}:
-                break
-
-            if status_code in {"anonymous_home", "login_page_pending", "unknown"} and attempt < 3:
-                wait_seconds(2, 4, "登录入口未就绪，等待后重试")
-                continue
-
-            break
-
-        try:
-            diagnostic_snapshot = self._fetch_page_snapshot(
-                last_snapshot.get("url") or HOME_URL,
-                include_auth_signals=True,
-                include_login_form_signals=True,
-                screenshot_path=LOGIN_FAILURE_SCREENSHOT,
-            )
-            if diagnostic_snapshot:
-                last_snapshot = diagnostic_snapshot
-        except Exception as exc:
-            logger.warning(f"补抓浏览器登录诊断页面失败: {str(exc)}")
-
-        self._log_login_diagnostics("账号密码-浏览器入口", last_snapshot, last_reason)
-        if not COOKIES:
-            logger.info("如站点持续拦截账号密码登录，建议优先改用 LINUXDO_COOKIES")
-        return False
-
-    def login(self) -> bool:
-        if not USERNAME or not PASSWORD:
-            logger.error("未配置账号密码，无法执行账号密码登录")
-            return False
-
-        if self._login_via_http():
-            return True
-
-        return self._browser_login()
 
     def _open_home_page(self) -> None:
         if self.page is not None:
@@ -1583,9 +1035,11 @@ class LinuxDoBrowser:
                 if reason and empty_retry_count in {1, 3, 6, 10, max_empty_retries}:
                     logger.info(f"首页状态提示: {reason}")
                 if status_code in {"login_page", "cookie_invalid"}:
+                    self._remember_failure("浏览过程中登录态疑似失效")
                     logger.error("浏览过程中登录态疑似失效，提前结束浏览任务")
                     return processed_count > 0
                 if empty_retry_count > max_empty_retries:
+                    self._remember_failure("多次未找到主题帖")
                     logger.error("多次未找到主题帖，结束浏览任务")
                     return processed_count > 0
 
@@ -1622,6 +1076,7 @@ class LinuxDoBrowser:
                     else:
                         logger.warning("首页持续空列表，触发登录态复检")
                         if not self._validate_login_state("浏览恢复"):
+                            self._remember_failure(self.last_failure_reason or "浏览恢复阶段登录态复检失败")
                             logger.error("浏览恢复阶段登录态复检失败，提前结束浏览任务")
                             return processed_count > 0
                         self._open_home_page()
@@ -1795,23 +1250,28 @@ class LinuxDoBrowser:
         else:
             logger.warning("Connect 页面未解析出数据表")
 
-    def send_notifications(self, browse_enabled: bool) -> None:
-        status_msg = f"✅每日登录成功: {USERNAME or '<cookie-only>'}"
+    def send_success_notifications(self, browse_enabled: bool) -> None:
+        status_msg = "✅每日登录成功"
         if browse_enabled:
             status_msg += " + 浏览任务完成"
         self.notifier.send_all("LINUX DO", status_msg)
 
-    def run(self) -> None:
-        try:
-            if COOKIES:
-                login_res = self.login_with_cookies(COOKIES)
-                if not login_res:
-                    logger.warning("Cookie 登录失败，尝试账号密码登录...")
-                    login_res = self.login()
-            else:
-                login_res = self.login()
+    def send_failure_notification(self, reason: str) -> None:
+        reason = normalize_text(reason) or "未知失败"
+        self.notifier.send_telegram("LINUX DO", f"❌执行失败: {reason}")
 
+    def run(self) -> None:
+        failure_reason = ""
+        self.last_failure_reason = ""
+        try:
+            if not COOKIES:
+                failure_reason = "未配置 LINUXDO_COOKIES，无法执行 Cookie 登录"
+                logger.error(failure_reason)
+                return
+
+            login_res = self.login_with_cookies(COOKIES)
             if not login_res:
+                failure_reason = self.last_failure_reason or "Cookie 登录验证失败"
                 logger.error("登录验证失败，程序终止")
                 return
 
@@ -1822,6 +1282,7 @@ class LinuxDoBrowser:
             if BROWSE_ENABLED:
                 click_topic_res = self.click_topic(deadline_ts)
                 if not click_topic_res:
+                    failure_reason = self.last_failure_reason or "浏览任务失败"
                     logger.error("点击主题失败，程序终止")
                     return
                 logger.info("完成浏览任务")
@@ -1833,8 +1294,13 @@ class LinuxDoBrowser:
                 self.print_connect_info()
             else:
                 logger.info("已跳过 Connect 调试页，继续按主站主线收尾")
-            self.send_notifications(BROWSE_ENABLED)
+            self.send_success_notifications(BROWSE_ENABLED)
+        except Exception as exc:
+            failure_reason = f"运行异常: {str(exc)}"
+            logger.exception(failure_reason)
         finally:
+            if failure_reason:
+                self.send_failure_notification(failure_reason)
             try:
                 if self.page is not None:
                     self.page.close()
@@ -1847,10 +1313,29 @@ class LinuxDoBrowser:
                     logger.warning(f"关闭 Scrapling 会话失败: {str(exc)}")
 
 
+def validate_runtime_config() -> Tuple[bool, str]:
+    if COOKIES:
+        return True, ""
+    return False, "请设置 LINUXDO_COOKIES（Cookie 登录）"
+
+
+def send_startup_failure_notification(reason: str) -> None:
+    reason = normalize_text(reason) or "未知失败"
+    NotificationManager().send_telegram("LINUX DO", f"❌执行失败: {reason}")
+
+
 if __name__ == "__main__":
-    if not COOKIES and (not USERNAME or not PASSWORD):
-        print("请设置 LINUXDO_COOKIES（Cookie 登录），或同时设置 USERNAME 和 PASSWORD（账号密码登录）")
+    config_ok, config_message = validate_runtime_config()
+    if not config_ok:
+        print(config_message)
+        send_startup_failure_notification("未设置 LINUXDO_COOKIES，程序终止")
         raise SystemExit(1)
 
-    browser = LinuxDoBrowser()
+    try:
+        browser = LinuxDoBrowser()
+    except Exception as exc:
+        logger.exception(f"启动失败: {str(exc)}")
+        send_startup_failure_notification(f"启动失败: {str(exc)}")
+        raise
+
     browser.run()
