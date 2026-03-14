@@ -7,7 +7,9 @@ import functools
 import os
 import random
 import re
+import shlex
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -27,9 +29,124 @@ else:
     SCRAPLING_IMPORT_ERROR = None
 
 
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/146.0.0.0 Safari/537.36"
+)
+
+
+@dataclass(frozen=True)
+class CapturedRequestProfile:
+    url: str = ""
+    cookie_str: str = ""
+    headers: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def useragent(self) -> str:
+        return self.headers.get("user-agent", "").strip()
+
+    @property
+    def accept_language(self) -> str:
+        return self.headers.get("accept-language", "").strip()
+
+
+def looks_like_curl_command(raw_text: str) -> bool:
+    return raw_text.lstrip().startswith("curl ")
+
+
+def normalize_curl_command(raw_text: str) -> str:
+    return re.sub(r"\\\s*\n\s*", " ", raw_text).strip()
+
+
+def parse_header_line(raw_header: str) -> Tuple[str, str]:
+    if ":" not in raw_header:
+        return raw_header.strip().lower(), ""
+    name, value = raw_header.split(":", 1)
+    return name.strip().lower(), value.strip()
+
+
+def parse_curl_command(raw_command: str) -> CapturedRequestProfile:
+    command = normalize_curl_command(raw_command)
+    if not command:
+        return CapturedRequestProfile()
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return CapturedRequestProfile()
+
+    if not tokens or tokens[0] != "curl":
+        return CapturedRequestProfile()
+
+    url = ""
+    headers: Dict[str, str] = {}
+    cookie_str = ""
+    index = 1
+
+    while index < len(tokens):
+        token = tokens[index]
+
+        if token in {"-H", "--header"} and index + 1 < len(tokens):
+            header_name, header_value = parse_header_line(tokens[index + 1])
+            if header_name == "cookie":
+                cookie_str = header_value or cookie_str
+            elif header_name:
+                headers[header_name] = header_value
+            index += 2
+            continue
+
+        if token in {"-b", "--cookie"} and index + 1 < len(tokens):
+            cookie_str = tokens[index + 1].strip() or cookie_str
+            index += 2
+            continue
+
+        if token in {"-A", "--user-agent"} and index + 1 < len(tokens):
+            headers["user-agent"] = tokens[index + 1].strip()
+            index += 2
+            continue
+
+        if token in {"-e", "--referer"} and index + 1 < len(tokens):
+            headers["referer"] = tokens[index + 1].strip()
+            index += 2
+            continue
+
+        if token == "--url" and index + 1 < len(tokens):
+            url = tokens[index + 1].strip()
+            index += 2
+            continue
+
+        if token.startswith(("https://", "http://")) and not url:
+            url = token
+
+        index += 1
+
+    return CapturedRequestProfile(url=url, cookie_str=cookie_str, headers=headers)
+
+
+def resolve_cookie_source_profile(
+    raw_cookie_text: str,
+    raw_login_curl: str,
+) -> Tuple[CapturedRequestProfile, str]:
+    if raw_login_curl:
+        profile = parse_curl_command(raw_login_curl)
+        return profile, profile.cookie_str or raw_cookie_text
+
+    if looks_like_curl_command(raw_cookie_text):
+        profile = parse_curl_command(raw_cookie_text)
+        return profile, profile.cookie_str
+
+    return CapturedRequestProfile(), raw_cookie_text
+
+
 USERNAME = os.environ.get("LINUXDO_USERNAME") or os.environ.get("USERNAME")
 PASSWORD = os.environ.get("LINUXDO_PASSWORD") or os.environ.get("PASSWORD")
-COOKIES = os.environ.get("LINUXDO_COOKIES", "").strip()
+RAW_COOKIE_INPUT = os.environ.get("LINUXDO_COOKIES", "").strip()
+RAW_LOGIN_CURL = os.environ.get("LINUXDO_LOGIN_CURL", "").strip()
+CAPTURED_REQUEST_PROFILE, COOKIES = resolve_cookie_source_profile(
+    RAW_COOKIE_INPUT,
+    RAW_LOGIN_CURL,
+)
 CONNECT_COOKIES = os.environ.get("LINUXDO_CONNECT_COOKIES", "").strip()
 BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in [
     "false",
@@ -397,7 +514,7 @@ def classify_login_snapshot(
     if "/login" in current_url or "/session/sso_provider" in current_url:
         return "login_page", "跳转到了登录页或 SSO 页面，Cookie 可能失效"
 
-    if has_logged_in_ui and login_button_count == 0 and login_link_count == 0:
+    if has_logged_in_ui:
         return "ok", None
 
     if has_login_session_cookie and login_button_count == 0 and login_link_count == 0 and register_link_count == 0:
@@ -450,7 +567,7 @@ def classify_browser_login_entry(
     if has_login_form:
         return "login_form_ready", None
 
-    if (current_user_count > 0 or avatar_count > 0 or user_menu_count > 0) and login_button_count == 0 and login_link_count == 0:
+    if current_user_count > 0 or avatar_count > 0 or user_menu_count > 0:
         return "already_logged_in", None
 
     if "/session/sso_provider" in current_url:
@@ -519,6 +636,11 @@ class LinuxDoBrowser:
         self.browser = None
         self.page = None
         self.notifier = NotificationManager()
+        self.captured_request_profile = CAPTURED_REQUEST_PROFILE
+        self.browser_useragent = self.captured_request_profile.useragent or DEFAULT_USER_AGENT
+        self.browser_extra_headers: Dict[str, str] = {}
+        if self.captured_request_profile.accept_language:
+            self.browser_extra_headers["Accept-Language"] = self.captured_request_profile.accept_language
 
         self.session = requests.Session()
         if hasattr(self.session, "trust_env"):
@@ -527,11 +649,13 @@ class LinuxDoBrowser:
         self.request_kwargs = {}
         self.session.headers.update(
             {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0",
+                "User-Agent": self.browser_useragent,
                 "Accept": "application/json, text/javascript, */*; q=0.01",
-                "Accept-Language": "zh-CN,zh;q=0.9",
+                "Accept-Language": self.captured_request_profile.accept_language or "zh-CN,zh;q=0.9",
             }
         )
+        if self.captured_request_profile.headers.get("referer"):
+            self.session.headers["Referer"] = self.captured_request_profile.headers["referer"]
 
         try:
             if PROXY_URL:
@@ -577,6 +701,8 @@ class LinuxDoBrowser:
             network_idle=False,
             timeout=browser_timeout_ms(),
             google_search=False,
+            useragent=self.browser_useragent,
+            extra_headers=self.browser_extra_headers or None,
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
             proxy=self.local_proxy_url,
@@ -626,9 +752,7 @@ class LinuxDoBrowser:
                 continue
 
             target_url = (
-                CONNECT_URL
-                if default_target_url == CONNECT_URL or name in CONNECT_HOST_COOKIE_NAMES
-                else HOME_URL
+                default_target_url
             )
             payloads.append({"name": name, "value": value, "url": target_url})
 
@@ -646,7 +770,11 @@ class LinuxDoBrowser:
 
     def _session_cookies_to_browser_payloads(self) -> List[Dict[str, Any]]:
         payloads = []
-        for cookie in self.session.cookies:
+        cookie_jar = getattr(self.session.cookies, "jar", None)
+        if cookie_jar is None:
+            return payloads
+
+        for cookie in cookie_jar:
             payload = {
                 "name": cookie.name,
                 "value": cookie.value,
@@ -701,6 +829,86 @@ class LinuxDoBrowser:
         self.browser.context.clear_cookies()
         self.browser.context.add_cookies(payloads)
         return len(payloads)
+
+    @staticmethod
+    def _session_cookie_kwargs_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {}
+        domain = str(payload.get("domain") or "").strip()
+        path = str(payload.get("path") or "").strip()
+        secure = payload.get("secure")
+
+        if domain:
+            kwargs["domain"] = domain
+        elif payload.get("url"):
+            parsed = urlparse(str(payload["url"]))
+            if parsed.hostname:
+                kwargs["domain"] = parsed.hostname
+            if not path:
+                path = parsed.path or "/"
+            if secure is None:
+                secure = parsed.scheme == "https"
+
+        kwargs["path"] = path or "/"
+        if secure is not None:
+            kwargs["secure"] = bool(secure)
+
+        expires = payload.get("expires")
+        if expires:
+            kwargs["expires"] = expires
+        return kwargs
+
+    def _seed_session_cookies(
+        self,
+        cookie_str: str,
+        connect_cookie_str: str = "",
+    ) -> int:
+        payloads: List[Dict[str, Any]] = []
+        if cookie_str:
+            payloads.extend(self.build_cookie_payloads(cookie_str, HOME_URL))
+        if connect_cookie_str:
+            payloads.extend(self.build_cookie_payloads(connect_cookie_str, CONNECT_URL))
+
+        payloads = self._dedupe_cookie_payloads(payloads)
+        for payload in payloads:
+            self.session.cookies.set(
+                str(payload.get("name") or ""),
+                str(payload.get("value") or ""),
+                **self._session_cookie_kwargs_from_payload(payload),
+            )
+        return len(payloads)
+
+    def _warmup_session_from_captured_request(self) -> bool:
+        profile = self.captured_request_profile
+        if not profile.url or not profile.cookie_str:
+            return False
+
+        headers = {
+            header_name: header_value
+            for header_name, header_value in profile.headers.items()
+            if header_name != "cookie"
+        }
+
+        try:
+            response = self.session.get(
+                profile.url,
+                headers=headers,
+                impersonate="chrome136",
+                **self.request_kwargs,
+            )
+        except Exception as exc:
+            logger.warning(f"复用抓包请求预热 Cookie 会话失败: {str(exc)}")
+            return False
+
+        if response.status_code >= 400:
+            logger.warning(
+                f"复用抓包请求预热 Cookie 会话失败: status={response.status_code}, url={profile.url}"
+            )
+            return False
+
+        logger.info(
+            f"已复用抓包请求预热 Cookie 会话: status={response.status_code}, url={profile.url}"
+        )
+        return True
 
     def _sync_browser_cookies_to_session(self) -> None:
         self.session.cookies.clear()
@@ -991,12 +1199,17 @@ class LinuxDoBrowser:
 
     def login_with_cookies(self, cookie_str: str) -> bool:
         logger.info("检测到手动 Cookie，尝试 Cookie 登录...")
-        payload_count = self._seed_browser_cookies(cookie_str, CONNECT_COOKIES)
+        self.session.cookies.clear()
+        payload_count = self._seed_session_cookies(cookie_str, CONNECT_COOKIES)
         if payload_count <= 0:
             logger.error("Cookie 解析失败或为空，无法使用 Cookie 登录")
             return False
 
-        self.session.cookies.clear()
+        if self._warmup_session_from_captured_request():
+            payload_count = self._sync_session_cookies_to_browser()
+        else:
+            payload_count = self._seed_browser_cookies(cookie_str, CONNECT_COOKIES)
+
         if CONNECT_COOKIES:
             logger.info(f"已预注入 {payload_count} 个 Cookie 到 Scrapling 浏览器上下文（含 connect 域 Cookie）")
         else:
