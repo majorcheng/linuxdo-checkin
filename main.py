@@ -461,6 +461,25 @@ def is_pointer_intercept_error(exc: Exception) -> bool:
     return "intercepts pointer events" in str(exc)
 
 
+def extract_like_button_post_id(button: Any) -> str:
+    try:
+        return str(
+            button.evaluate(
+                "(el) => el.closest('article')?.getAttribute('data-post-id') || ''"
+            )
+            or ""
+        ).strip()
+    except Exception:
+        return ""
+
+
+def read_response_text(response: Any) -> str:
+    try:
+        return str(response.text() or "").strip()
+    except Exception:
+        return ""
+
+
 class ManagedStealthSession:
     """统一管理 Scrapling 会话和可选本地代理桥生命周期。"""
 
@@ -1198,8 +1217,8 @@ class LinuxDoBrowser:
             logger.info("达到单帖浏览步数上限，结束当前帖子")
 
     def click_like(self, page: Any) -> None:
-        selected_button = None
-        selected_selector = ""
+        candidate_buttons: List[Tuple[Any, str, str]] = []
+        seen_post_ids: set[str] = set()
         for selector in LIKE_BUTTON_SELECTORS:
             try:
                 locator = page.locator(selector)
@@ -1210,61 +1229,78 @@ class LinuxDoBrowser:
                 # 漂移为“外层 div + 内层真实 button”，这里显式挑可见的真实按钮。
                 for index in range(locator.count()):
                     candidate = locator.nth(index)
-                    if candidate.is_visible():
-                        selected_button = candidate
-                        selected_selector = selector
-                        break
-                if selected_button is not None:
-                    break
+                    if not candidate.is_visible():
+                        continue
+                    post_id = extract_like_button_post_id(candidate)
+                    dedupe_key = post_id or f"{selector}::{index}"
+                    if dedupe_key in seen_post_ids:
+                        continue
+                    seen_post_ids.add(dedupe_key)
+                    candidate_buttons.append((candidate, selector, post_id))
             except Exception as exc:
                 logger.warning(f"尝试点赞失败({selector}): {str(exc)}")
 
-        if selected_button is None:
+        if not candidate_buttons:
             logger.info("帖子可能已经点过赞了，或当前页面没有可点击的点赞按钮")
             return
 
-        try:
+        for selected_button, selected_selector, selected_post_id in candidate_buttons:
             try:
-                # 顶部 sticky header 会遮住靠近视口顶部的点赞区，先把目标滚到视口中部，
-                # 减少被 d-header-wrap 抢到点击的问题。
-                selected_button.evaluate(
-                    "(el) => el.scrollIntoView({block: 'center', inline: 'center'})"
-                )
-            except Exception:
-                pass
-            try:
-                page.wait_for_timeout(150)
-            except Exception:
-                time.sleep(0.15)
-
-            # 继续走页面点击，但以接口返回 200 作为业务成功口径，
-            # 避免把“按钮点击没报错”误记成真正点赞成功。
-            with page.expect_response(
-                lambda response: is_like_toggle_url(getattr(response, "url", "")),
-                timeout=8_000,
-            ) as response_info:
                 try:
-                    selected_button.click(timeout=3_000)
-                except Exception as exc:
-                    if not is_pointer_intercept_error(exc):
-                        raise
-                    logger.info(
-                        f"原生点赞点击被页面遮挡，降级为 DOM click: selector={selected_selector}"
+                    # 顶部 sticky header 会遮住靠近视口顶部的点赞区，先把目标滚到视口中部，
+                    # 减少被 d-header-wrap 抢到点击的问题。
+                    selected_button.evaluate(
+                        "(el) => el.scrollIntoView({block: 'center', inline: 'center'})"
                     )
-                    selected_button.evaluate("(el) => el.click()")
+                except Exception:
+                    pass
+                try:
+                    page.wait_for_timeout(150)
+                except Exception:
+                    time.sleep(0.15)
 
-            response = response_info.value
-            status_code = getattr(response, "status", None)
-            if status_code == 200:
-                logger.info("点赞成功")
-                time.sleep(random.uniform(1, 2))
-                return
+                # 继续走页面点击，但以接口返回 200 作为业务成功口径，
+                # 避免把“按钮点击没报错”误记成真正点赞成功。
+                with page.expect_response(
+                    lambda response: is_like_toggle_url(getattr(response, "url", "")),
+                    timeout=8_000,
+                ) as response_info:
+                    try:
+                        selected_button.click(timeout=3_000)
+                    except Exception as exc:
+                        if not is_pointer_intercept_error(exc):
+                            raise
+                        logger.info(
+                            "原生点赞点击被页面遮挡，降级为 DOM click: "
+                            f"selector={selected_selector}, post_id={selected_post_id or '<unknown>'}"
+                        )
+                        selected_button.evaluate("(el) => el.click()")
 
-            logger.warning(
-                f"点赞请求已发出，但接口返回异常状态({status_code})，selector={selected_selector}"
-            )
-        except Exception as exc:
-            logger.warning(f"尝试点赞失败({selected_selector}): {str(exc)}")
+                response = response_info.value
+                status_code = getattr(response, "status", None)
+                response_text = read_response_text(response)
+                if status_code == 200:
+                    logger.info(f"点赞成功 post_id={selected_post_id or '<unknown>'}")
+                    time.sleep(random.uniform(1, 2))
+                    return
+
+                preview = response_text[:160] if response_text else ""
+                logger.warning(
+                    "点赞请求已发出，但接口返回异常状态"
+                    f"({status_code})，selector={selected_selector}, "
+                    f"post_id={selected_post_id or '<unknown>'}, "
+                    f"response_url={getattr(response, 'url', '')}, "
+                    f"response_preview={preview or '<empty>'}"
+                )
+                if status_code == 403:
+                    logger.info("当前候选帖子不可点赞，继续尝试下一个可见点赞按钮")
+                    continue
+            except Exception as exc:
+                logger.warning(
+                    f"尝试点赞失败({selected_selector}, post_id={selected_post_id or '<unknown>'}): {str(exc)}"
+                )
+
+        logger.info("当前页面所有可见点赞按钮都未成功点赞")
 
     def print_connect_info(self) -> None:
         logger.info("获取连接信息")
