@@ -2,6 +2,7 @@ import main
 import pytest
 from main import (
     LinuxDoBrowser,
+    build_like_toggle_fragment,
     extract_like_button_post_id,
     is_like_toggle_url,
     is_pointer_intercept_error,
@@ -88,9 +89,11 @@ class FakeLikePage:
         self.expect_response_calls.append(timeout)
         def factory():
             assert self.responses, "no fake responses left"
-            response = self.responses.pop(0)
-            assert predicate(response) is True
-            return response
+            while self.responses:
+                response = self.responses.pop(0)
+                if predicate(response) is True:
+                    return response
+            raise AssertionError("no matching fake response found")
 
         return FakeResponseInfo(factory)
 
@@ -138,6 +141,14 @@ def test_is_like_toggle_url_matches_current_endpoint():
 
 def test_extract_like_button_post_id_reads_closest_article_id():
     assert extract_like_button_post_id(FakeButton(post_id="16477673")) == "16477673"
+
+
+def test_build_like_toggle_fragment_uses_exact_post_id():
+    assert (
+        build_like_toggle_fragment("16477673")
+        == "/discourse-reactions/posts/16477673/custom-reactions/heart/toggle.json"
+    )
+    assert build_like_toggle_fragment("") == ""
 
 
 def test_click_like_uses_real_button_and_waits_for_toggle_response(monkeypatch):
@@ -233,6 +244,34 @@ def test_click_like_retries_next_candidate_after_403(monkeypatch):
     assert first_button.click_count == 1
     assert second_button.click_count == 1
     assert page.expect_response_calls == [8_000, 8_000]
+
+
+def test_click_like_ignores_toggle_response_for_other_post_id(monkeypatch):
+    button = FakeButton(post_id="16470647")
+    wrong_response = FakeResponse(
+        "https://linux.do/discourse-reactions/posts/16470811/custom-reactions/heart/toggle.json",
+        403,
+        "<html dir='ltr'>",
+    )
+    right_response = FakeResponse(
+        "https://linux.do/discourse-reactions/posts/16470647/custom-reactions/heart/toggle.json",
+        200,
+        "{}",
+    )
+    page = FakeLikePage(
+        {main.LIKE_BUTTON_SELECTORS[0]: [button]},
+        [wrong_response, right_response],
+    )
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+
+    monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    browser.click_like(page)
+
+    assert button.click_count == 1
+    assert page.expect_response_calls == [8_000]
+    assert page.responses == []
 
 
 @pytest.mark.parametrize(

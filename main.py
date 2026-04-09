@@ -461,6 +461,13 @@ def is_pointer_intercept_error(exc: Exception) -> bool:
     return "intercepts pointer events" in str(exc)
 
 
+def build_like_toggle_fragment(post_id: str) -> str:
+    post_id = str(post_id or "").strip()
+    if not post_id:
+        return ""
+    return f"/discourse-reactions/posts/{post_id}/custom-reactions/heart/toggle.json"
+
+
 def extract_like_button_post_id(button: Any) -> str:
     try:
         return str(
@@ -1246,6 +1253,7 @@ class LinuxDoBrowser:
 
         for selected_button, selected_selector, selected_post_id in candidate_buttons:
             try:
+                expected_toggle_fragment = build_like_toggle_fragment(selected_post_id)
                 try:
                     # 顶部 sticky header 会遮住靠近视口顶部的点赞区，先把目标滚到视口中部，
                     # 减少被 d-header-wrap 抢到点击的问题。
@@ -1262,7 +1270,13 @@ class LinuxDoBrowser:
                 # 继续走页面点击，但以接口返回 200 作为业务成功口径，
                 # 避免把“按钮点击没报错”误记成真正点赞成功。
                 with page.expect_response(
-                    lambda response: is_like_toggle_url(getattr(response, "url", "")),
+                    lambda response: (
+                        is_like_toggle_url(getattr(response, "url", ""))
+                        and (
+                            not expected_toggle_fragment
+                            or expected_toggle_fragment in getattr(response, "url", "")
+                        )
+                    ),
                     timeout=8_000,
                 ) as response_info:
                     try:
