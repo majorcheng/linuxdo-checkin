@@ -226,6 +226,21 @@ LOGGED_IN_USER_SELECTORS = (
     ".current-user",
     "[data-identifier='user-menu']",
 )
+LIKE_ATTEMPT_PROBABILITY = 0.5
+LIKE_BUTTON_SELECTORS = (
+    ".discourse-reactions-reaction-button[title='点赞此帖子'] button.btn-toggle-reaction-like",
+    ".discourse-reactions-reaction-button[title='点赞此帖子'] button.reaction-button",
+    "button.btn-toggle-reaction-like[title='点赞此帖子']",
+    "button.reaction-button[title='点赞此帖子']",
+    ".discourse-reactions-reaction-button[title='Like this post'] button.btn-toggle-reaction-like",
+    ".discourse-reactions-reaction-button[title='Like this post'] button.reaction-button",
+    "button.btn-toggle-reaction-like[title='Like this post']",
+    "button.reaction-button[title='Like this post']",
+)
+LIKE_TOGGLE_URL_KEYWORDS = (
+    "/discourse-reactions/posts/",
+    "/custom-reactions/heart/toggle.json",
+)
 
 
 def retry_decorator(retries: int = 3, min_delay: int = 5, max_delay: int = 10):
@@ -434,6 +449,12 @@ def extract_target_phrase(body_text: str) -> str:
     start = max(0, index - 24)
     end = min(len(body_text), index + len(marker) + 24)
     return body_text[start:end]
+
+
+def is_like_toggle_url(url: str) -> bool:
+    if not url:
+        return False
+    return all(keyword in url for keyword in LIKE_TOGGLE_URL_KEYWORDS)
 
 
 class ManagedStealthSession:
@@ -1123,7 +1144,7 @@ class LinuxDoBrowser:
         try:
             page.goto(topic_url, wait_until="domcontentloaded")
             wait_page_seconds(page, 2.0, 4.0, "进入帖子后停留")
-            if random.random() < 0.3:
+            if random.random() < LIKE_ATTEMPT_PROBABILITY:
                 self.click_like(page)
             self.browse_post(page)
         finally:
@@ -1173,22 +1194,52 @@ class LinuxDoBrowser:
             logger.info("达到单帖浏览步数上限，结束当前帖子")
 
     def click_like(self, page: Any) -> None:
-        selectors = (
-            ".discourse-reactions-reaction-button",
-            "button.discourse-reactions-reaction-button",
-        )
-        for selector in selectors:
+        selected_button = None
+        selected_selector = ""
+        for selector in LIKE_BUTTON_SELECTORS:
             try:
                 locator = page.locator(selector)
                 if locator.count() <= 0:
                     continue
-                locator.first.click(timeout=3_000)
+
+                # 页面结构已从“按钮本身带 discourse-reactions-reaction-button 类”
+                # 漂移为“外层 div + 内层真实 button”，这里显式挑可见的真实按钮。
+                for index in range(locator.count()):
+                    candidate = locator.nth(index)
+                    if candidate.is_visible():
+                        selected_button = candidate
+                        selected_selector = selector
+                        break
+                if selected_button is not None:
+                    break
+            except Exception as exc:
+                logger.warning(f"尝试点赞失败({selector}): {str(exc)}")
+
+        if selected_button is None:
+            logger.info("帖子可能已经点过赞了，或当前页面没有可点击的点赞按钮")
+            return
+
+        try:
+            # 继续走页面点击，但以接口返回 200 作为业务成功口径，
+            # 避免把“按钮点击没报错”误记成真正点赞成功。
+            with page.expect_response(
+                lambda response: is_like_toggle_url(getattr(response, "url", "")),
+                timeout=8_000,
+            ) as response_info:
+                selected_button.click(timeout=3_000)
+
+            response = response_info.value
+            status_code = getattr(response, "status", None)
+            if status_code == 200:
                 logger.info("点赞成功")
                 time.sleep(random.uniform(1, 2))
                 return
-            except Exception as exc:
-                logger.warning(f"尝试点赞失败({selector}): {str(exc)}")
-        logger.info("帖子可能已经点过赞了，或当前页面没有可点击的点赞按钮")
+
+            logger.warning(
+                f"点赞请求已发出，但接口返回异常状态({status_code})，selector={selected_selector}"
+            )
+        except Exception as exc:
+            logger.warning(f"尝试点赞失败({selected_selector}): {str(exc)}")
 
     def print_connect_info(self) -> None:
         logger.info("获取连接信息")
