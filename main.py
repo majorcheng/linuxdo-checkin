@@ -457,6 +457,10 @@ def is_like_toggle_url(url: str) -> bool:
     return all(keyword in url for keyword in LIKE_TOGGLE_URL_KEYWORDS)
 
 
+def is_pointer_intercept_error(exc: Exception) -> bool:
+    return "intercepts pointer events" in str(exc)
+
+
 class ManagedStealthSession:
     """统一管理 Scrapling 会话和可选本地代理桥生命周期。"""
 
@@ -1220,13 +1224,34 @@ class LinuxDoBrowser:
             return
 
         try:
+            try:
+                # 顶部 sticky header 会遮住靠近视口顶部的点赞区，先把目标滚到视口中部，
+                # 减少被 d-header-wrap 抢到点击的问题。
+                selected_button.evaluate(
+                    "(el) => el.scrollIntoView({block: 'center', inline: 'center'})"
+                )
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(150)
+            except Exception:
+                time.sleep(0.15)
+
             # 继续走页面点击，但以接口返回 200 作为业务成功口径，
             # 避免把“按钮点击没报错”误记成真正点赞成功。
             with page.expect_response(
                 lambda response: is_like_toggle_url(getattr(response, "url", "")),
                 timeout=8_000,
             ) as response_info:
-                selected_button.click(timeout=3_000)
+                try:
+                    selected_button.click(timeout=3_000)
+                except Exception as exc:
+                    if not is_pointer_intercept_error(exc):
+                        raise
+                    logger.info(
+                        f"原生点赞点击被页面遮挡，降级为 DOM click: selector={selected_selector}"
+                    )
+                    selected_button.evaluate("(el) => el.click()")
 
             response = response_info.value
             status_code = getattr(response, "status", None)

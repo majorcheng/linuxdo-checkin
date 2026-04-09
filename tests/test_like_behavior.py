@@ -1,20 +1,28 @@
 import main
 import pytest
-from main import LinuxDoBrowser, is_like_toggle_url
+from main import LinuxDoBrowser, is_like_toggle_url, is_pointer_intercept_error
 
 
 class FakeButton:
-    def __init__(self, visible: bool = True) -> None:
+    def __init__(self, visible: bool = True, click_error: Exception | None = None) -> None:
         self.visible = visible
         self.click_count = 0
         self.last_timeout = None
+        self.click_error = click_error
+        self.evaluate_calls = []
 
     def is_visible(self) -> bool:
         return self.visible
 
     def click(self, timeout=None) -> None:
+        if self.click_error is not None:
+            raise self.click_error
         self.click_count += 1
         self.last_timeout = timeout
+
+    def evaluate(self, script: str):
+        self.evaluate_calls.append(script)
+        return None
 
 
 class FakeLocator:
@@ -51,6 +59,7 @@ class FakeLikePage:
         self.response = response
         self.locator_calls = []
         self.expect_response_calls = []
+        self.wait_timeout_calls = []
 
     def locator(self, selector: str) -> FakeLocator:
         self.locator_calls.append(selector)
@@ -60,6 +69,9 @@ class FakeLikePage:
         self.expect_response_calls.append(timeout)
         assert predicate(self.response) is True
         return FakeResponseInfo(self.response)
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        self.wait_timeout_calls.append(timeout)
 
 
 class FakeTopicPage:
@@ -120,7 +132,45 @@ def test_click_like_uses_real_button_and_waits_for_toggle_response(monkeypatch):
     assert button.click_count == 1
     assert button.last_timeout == 3_000
     assert page.expect_response_calls == [8_000]
+    assert page.wait_timeout_calls == [150]
     assert page.locator_calls[0] == main.LIKE_BUTTON_SELECTORS[0]
+    assert button.evaluate_calls == [
+        "(el) => el.scrollIntoView({block: 'center', inline: 'center'})"
+    ]
+
+
+def test_click_like_falls_back_to_dom_click_when_pointer_is_intercepted(monkeypatch):
+    button = FakeButton(
+        click_error=RuntimeError(
+            "Locator.click: Timeout 3000ms exceeded. <div> intercepts pointer events"
+        )
+    )
+    response = FakeResponse(
+        "https://linux.do/discourse-reactions/posts/16477673/custom-reactions/heart/toggle.json",
+        200,
+    )
+    page = FakeLikePage(
+        {main.LIKE_BUTTON_SELECTORS[0]: [button]},
+        response,
+    )
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+
+    monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    browser.click_like(page)
+
+    assert button.click_count == 0
+    assert button.evaluate_calls == [
+        "(el) => el.scrollIntoView({block: 'center', inline: 'center'})",
+        "(el) => el.click()",
+    ]
+    assert page.expect_response_calls == [8_000]
+
+
+def test_is_pointer_intercept_error_matches_current_playwright_message():
+    assert is_pointer_intercept_error(RuntimeError("foo intercepts pointer events bar"))
+    assert not is_pointer_intercept_error(RuntimeError("other error"))
 
 
 @pytest.mark.parametrize(
