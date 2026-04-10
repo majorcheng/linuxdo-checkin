@@ -227,6 +227,7 @@ LOGGED_IN_USER_SELECTORS = (
     "[data-identifier='user-menu']",
 )
 LIKE_ATTEMPT_PROBABILITY = 0.5
+LIKE_ACTION_ID = 2
 LIKE_BUTTON_SELECTORS = (
     ".discourse-reactions-reaction-button[title='点赞此帖子'] button.btn-toggle-reaction-like",
     ".discourse-reactions-reaction-button[title='点赞此帖子'] button.reaction-button",
@@ -468,6 +469,21 @@ def build_like_toggle_fragment(post_id: str) -> str:
     return f"/discourse-reactions/posts/{post_id}/custom-reactions/heart/toggle.json"
 
 
+def build_topic_json_url(url: str) -> str:
+    if not url:
+        return ""
+
+    parsed = urlparse(url)
+    if not parsed.netloc.endswith("linux.do"):
+        return ""
+
+    match = re.search(r"(/t/[^/?#]+/\d+)", parsed.path or "")
+    if not match:
+        return ""
+
+    return parsed._replace(path=f"{match.group(1)}.json", query="", fragment="").geturl()
+
+
 def extract_like_button_post_id(button: Any) -> str:
     try:
         return str(
@@ -485,6 +501,59 @@ def read_response_text(response: Any) -> str:
         return str(response.text() or "").strip()
     except Exception:
         return ""
+
+
+def extract_like_action_summary(post_payload: Dict[str, Any]) -> Dict[str, Any]:
+    actions_summary = post_payload.get("actions_summary") or []
+    if not isinstance(actions_summary, list):
+        return {}
+
+    for action in actions_summary:
+        if not isinstance(action, dict):
+            continue
+        try:
+            if int(action.get("id") or 0) == LIKE_ACTION_ID:
+                return action
+        except (TypeError, ValueError):
+            continue
+    return {}
+
+
+def is_likeable_post_payload(post_payload: Dict[str, Any]) -> bool:
+    if not isinstance(post_payload, dict):
+        return False
+
+    if bool(post_payload.get("yours")):
+        return False
+
+    like_action = extract_like_action_summary(post_payload)
+    if not like_action:
+        return False
+
+    if bool(like_action.get("acted")):
+        return False
+
+    if like_action.get("can_act") is False:
+        return False
+
+    return bool(like_action.get("can_act", True))
+
+
+def collect_likeable_post_ids(topic_payload: Dict[str, Any]) -> List[str]:
+    post_stream = topic_payload.get("post_stream") or {}
+    posts = post_stream.get("posts") or []
+    if not isinstance(posts, list):
+        return []
+
+    post_ids: List[str] = []
+    for post in posts:
+        if not is_likeable_post_payload(post):
+            continue
+        post_id = str(post.get("id") or "").strip()
+        if not post_id:
+            continue
+        post_ids.append(post_id)
+    return post_ids
 
 
 class ManagedStealthSession:
@@ -1223,98 +1292,131 @@ class LinuxDoBrowser:
         if not stopped_early:
             logger.info("达到单帖浏览步数上限，结束当前帖子")
 
+    def _request_session_json(
+        self,
+        url: str,
+        *,
+        referer_url: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        headers = {
+            "Referer": referer_url or HOME_URL,
+            "X-Requested-With": "XMLHttpRequest",
+        }
+        response = self.session.get(
+            url,
+            headers=headers,
+            impersonate="chrome136",
+            **self.request_kwargs,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"status={response.status_code}, url={url}")
+
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"响应不是 JSON object: url={url}")
+        return payload
+
+    def _fetch_likeable_post_ids(self, page: Any) -> List[str]:
+        topic_json_url = build_topic_json_url(getattr(page, "url", "") or "")
+        if not topic_json_url:
+            logger.info("当前页面不是标准主题帖 URL，跳过点赞")
+            return []
+
+        topic_payload = self._request_session_json(
+            topic_json_url,
+            referer_url=getattr(page, "url", "") or HOME_URL,
+        )
+        return collect_likeable_post_ids(topic_payload)
+
+    def _fetch_csrf_token(self, referer_url: str) -> str:
+        payload = self._request_session_json(
+            f"{HOME_URL.rstrip('/')}/session/csrf",
+            referer_url=referer_url,
+        )
+        csrf_token = str(payload.get("csrf") or "").strip()
+        if not csrf_token:
+            raise RuntimeError("未拿到 csrf token")
+        return csrf_token
+
+    def _confirm_post_liked(self, post_id: str, referer_url: str) -> bool:
+        payload = self._request_session_json(
+            f"{HOME_URL.rstrip('/')}/posts/{post_id}",
+            referer_url=referer_url,
+        )
+        return bool(extract_like_action_summary(payload).get("acted"))
+
     def click_like(self, page: Any) -> None:
-        candidate_buttons: List[Tuple[Any, str, str]] = []
-        seen_post_ids: set[str] = set()
         for selector in LIKE_BUTTON_SELECTORS:
             try:
                 locator = page.locator(selector)
                 if locator.count() <= 0:
                     continue
-
-                # 页面结构已从“按钮本身带 discourse-reactions-reaction-button 类”
-                # 漂移为“外层 div + 内层真实 button”，这里显式挑可见的真实按钮。
-                for index in range(locator.count()):
-                    candidate = locator.nth(index)
-                    if not candidate.is_visible():
-                        continue
-                    post_id = extract_like_button_post_id(candidate)
-                    dedupe_key = post_id or f"{selector}::{index}"
-                    if dedupe_key in seen_post_ids:
-                        continue
-                    seen_post_ids.add(dedupe_key)
-                    candidate_buttons.append((candidate, selector, post_id))
+                logger.info(f"确认当前主题存在点赞按钮: selector={selector}")
+                break
             except Exception as exc:
                 logger.warning(f"尝试点赞失败({selector}): {str(exc)}")
-
-        if not candidate_buttons:
+        else:
             logger.info("帖子可能已经点过赞了，或当前页面没有可点击的点赞按钮")
             return
 
-        for selected_button, selected_selector, selected_post_id in candidate_buttons:
+        try:
+            # 浏览器页面里哪些按钮“可见”并不代表它们一定“还没点过赞”。
+            # 这里先回读主题 JSON，只挑 acted!=true 且 can_act=true 的帖子，
+            # 避免重复执行时把旧赞误点成取消赞。
+            self._sync_browser_cookies_to_session()
+            referer_url = getattr(page, "url", "") or HOME_URL
+            likeable_post_ids = self._fetch_likeable_post_ids(page)
+            if not likeable_post_ids:
+                logger.info("当前主题没有可点赞的未点赞帖子")
+                return
+            csrf_token = self._fetch_csrf_token(referer_url)
+        except Exception as exc:
+            logger.warning(f"读取主题点赞状态失败，跳过点赞: {str(exc)}")
+            return
+
+        for selected_post_id in likeable_post_ids:
             try:
-                expected_toggle_fragment = build_like_toggle_fragment(selected_post_id)
-                try:
-                    # 顶部 sticky header 会遮住靠近视口顶部的点赞区，先把目标滚到视口中部，
-                    # 减少被 d-header-wrap 抢到点击的问题。
-                    selected_button.evaluate(
-                        "(el) => el.scrollIntoView({block: 'center', inline: 'center'})"
-                    )
-                except Exception:
-                    pass
-                try:
-                    page.wait_for_timeout(150)
-                except Exception:
-                    time.sleep(0.15)
+                response = self.session.put(
+                    f"{HOME_URL.rstrip('/')}{build_like_toggle_fragment(selected_post_id)}",
+                    headers={
+                        "Accept": "*/*",
+                        "Origin": HOME_URL.rstrip("/"),
+                        "Referer": referer_url,
+                        "Discourse-Logged-In": "true",
+                        "Discourse-Present": "true",
+                        "X-CSRF-Token": csrf_token,
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
+                    impersonate="chrome136",
+                    **self.request_kwargs,
+                )
 
-                # 继续走页面点击，但以接口返回 200 作为业务成功口径，
-                # 避免把“按钮点击没报错”误记成真正点赞成功。
-                with page.expect_response(
-                    lambda response: (
-                        is_like_toggle_url(getattr(response, "url", ""))
-                        and (
-                            not expected_toggle_fragment
-                            or expected_toggle_fragment in getattr(response, "url", "")
-                        )
-                    ),
-                    timeout=8_000,
-                ) as response_info:
-                    try:
-                        selected_button.click(timeout=3_000)
-                    except Exception as exc:
-                        if not is_pointer_intercept_error(exc):
-                            raise
-                        logger.info(
-                            "原生点赞点击被页面遮挡，降级为 DOM click: "
-                            f"selector={selected_selector}, post_id={selected_post_id or '<unknown>'}"
-                        )
-                        selected_button.evaluate("(el) => el.click()")
-
-                response = response_info.value
-                status_code = getattr(response, "status", None)
-                response_text = read_response_text(response)
-                if status_code == 200:
+                if response.status_code == 200 and self._confirm_post_liked(
+                    selected_post_id,
+                    referer_url,
+                ):
                     logger.info(f"点赞成功 post_id={selected_post_id or '<unknown>'}")
                     time.sleep(random.uniform(1, 2))
                     return
 
+                response_text = read_response_text(response)
                 preview = response_text[:160] if response_text else ""
                 logger.warning(
                     "点赞请求已发出，但接口返回异常状态"
-                    f"({status_code})，selector={selected_selector}, "
+                    f"({response.status_code})，"
                     f"post_id={selected_post_id or '<unknown>'}, "
                     f"response_url={getattr(response, 'url', '')}, "
                     f"response_preview={preview or '<empty>'}"
                 )
-                if status_code == 403:
+                if response.status_code == 403:
                     logger.info("当前候选帖子不可点赞，继续尝试下一个可见点赞按钮")
                     continue
             except Exception as exc:
                 logger.warning(
-                    f"尝试点赞失败({selected_selector}, post_id={selected_post_id or '<unknown>'}): {str(exc)}"
+                    f"尝试点赞失败(post_id={selected_post_id or '<unknown>'}): {str(exc)}"
                 )
 
-        logger.info("当前页面所有可见点赞按钮都未成功点赞")
+        logger.info("当前主题所有未点赞帖子都未成功点赞")
 
     def print_connect_info(self) -> None:
         logger.info("获取连接信息")
