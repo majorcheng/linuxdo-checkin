@@ -7,7 +7,9 @@
 - [x] 复核最新 Action 现场日志，确认真实点击已发生但仍返回 Cloudflare challenge HTML
 - [x] 将 CI 浏览器模式改为显式可配置，并在 GitHub Actions 上切到 headed + real Chrome
 - [x] 为浏览器模式开关补单测，并重新跑 `py_compile` / `pytest`
-- [ ] 推送当前修复并手动触发新的 `Daily Check-in`
+- [x] 推送 headed + real Chrome 修复并手动触发新的 `Daily Check-in`
+- [x] 跟踪 headed + real Chrome 回归日志，确认浏览器模式切换已生效但点赞仍未成功
+- [ ] 移除 Action 代理出口并再次触发 `Daily Check-in`，验证 runner 直连是否能打通点赞
 - [ ] 跟踪最新 workflow 日志，确认出现至少一次“点赞成功”
 
 ## 复盘小结
@@ -16,4 +18,5 @@
 - 第二轮已经把执行口径改成真实按钮点击，但 Action 现场日志表明真实点击总被遮挡，随后退回 `DOM click`，最终仍被 challenge。
 - 第三轮最小修复是：保留主题 JSON 候选筛选，但彻底禁用 `DOM click` 退路；若按钮被遮挡，则重新定位后重试真实点击，仍失败就切下一个候选。
 - 最新证据显示，在清理遮挡弹窗后，Action 中的真实点击已经能稳定发出请求，但仍收到 `403 / Just a moment...`，根因进一步收敛到 CI 浏览器环境本身。
-- 当前轮次的最小实验是把 Action 明确切到 `headed + real Chrome + xvfb-run`，尽量逼近本地已验证成功的真实 Chrome 运行形态。
+- `headed + real Chrome + xvfb-run` 已在 Action 中生效，但 challenge 仍然存在；这否定了“只要摆脱 headless Chromium 就能成功”的假设。
+- 当前轮次新的最小实验是让 Action 暂时去掉代理直连 runner 出口，验证剩余差异是否来自代理出口信誉或代理链路本身。

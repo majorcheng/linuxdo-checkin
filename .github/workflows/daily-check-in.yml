@@ -40,8 +40,7 @@ jobs:
           LINUXDO_LOGIN_CURL: ${{ secrets.LINUXDO_LOGIN_CURL }}
           LINUXDO_CONNECT_COOKIES: ${{ secrets.LINUXDO_CONNECT_COOKIES }}
           BROWSE_ENABLED: ${{ secrets.BROWSE_ENABLED }}
-          LINUXDO_PROXY_URL: ${{ secrets.LINUXDO_PROXY_URL }}
-          LINUXDO_PROXY_INSECURE: ${{ secrets.LINUXDO_PROXY_INSECURE }}
+          # 点赞链路在代理出口上持续命中 Cloudflare challenge，这里先改走 runner 直连做现场回归。
           LINUXDO_BROWSER_HEADLESS: "false"
           LINUXDO_BROWSER_REAL_CHROME: "true"
         run: |
