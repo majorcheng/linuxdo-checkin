@@ -269,6 +269,22 @@ LIKE_BUTTON_REPOSITION_STEPS = (
   window.scrollTo(0, Math.max(absoluteTop - offsetTop, 0));
 }""",
 )
+DISMISS_BLOCKING_DIALOG_SCRIPT = """() => {
+  const holder = document.querySelector('#dialog-holder');
+  if (!holder) {
+    return { found: false, dismissed: false, method: '' };
+  }
+  const closeButton = holder.querySelector(
+    'button[aria-label="Close"], .dialog-header button, .dialog-close, .dialog-footer .btn, .dialog-footer button'
+  );
+  if (closeButton instanceof HTMLElement) {
+    closeButton.click();
+    return { found: true, dismissed: true, method: 'close-button' };
+  }
+  holder.remove();
+  document.querySelectorAll('.dialog-overlay').forEach((node) => node.remove());
+  return { found: true, dismissed: true, method: 'remove-holder' };
+}"""
 LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT = """() => {
   const header = document.querySelector('.d-header-wrap');
   if (!header) return;
@@ -1454,6 +1470,26 @@ class LinuxDoBrowser:
         except Exception:
             pass
 
+    def _dismiss_blocking_dialog(self, page: Any) -> bool:
+        try:
+            result = page.evaluate(DISMISS_BLOCKING_DIALOG_SCRIPT)
+        except Exception as exc:
+            logger.warning(f"尝试清理阻塞弹窗失败: {str(exc)}")
+            return False
+        if not isinstance(result, dict):
+            return False
+        if not result.get("found"):
+            return False
+        logger.info(
+            "检测到阻塞点赞的弹窗，已尝试清理: "
+            f"method={result.get('method') or '<unknown>'}"
+        )
+        try:
+            page.wait_for_timeout(LIKE_BUTTON_SETTLE_TIMEOUT_MS)
+        except Exception:
+            time.sleep(LIKE_BUTTON_SETTLE_TIMEOUT_MS / 1000)
+        return bool(result.get("dismissed"))
+
     def _click_candidate_like_button(
         self,
         page: Any,
@@ -1518,6 +1554,7 @@ class LinuxDoBrowser:
             logger.info("当前主题没有可点赞的未点赞帖子")
             return
         for selected_post_id in likeable_post_ids:
+            self._dismiss_blocking_dialog(page)
             button, scoped_selector = self._find_candidate_like_button(page, selected_post_id)
             if button is None:
                 logger.info(f"当前页面未找到候选楼层按钮，跳过 post_id={selected_post_id}")

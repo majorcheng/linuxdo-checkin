@@ -82,7 +82,13 @@ class FakeResponseInfo:
 
 
 class FakeLikePage:
-    def __init__(self, selector_map, responses=None, url: str = "https://linux.do/t/topic/1934859") -> None:
+    def __init__(
+        self,
+        selector_map,
+        responses=None,
+        url: str = "https://linux.do/t/topic/1934859",
+        dialog_present: bool = False,
+    ) -> None:
         self.selector_map = selector_map
         self.responses = list(responses or [])
         self.url = url
@@ -90,6 +96,7 @@ class FakeLikePage:
         self.expect_response_calls = []
         self.wait_timeout_calls = []
         self.page_evaluate_calls = []
+        self.dialog_present = dialog_present
 
     def locator(self, selector: str) -> FakeLocator:
         self.locator_calls.append(selector)
@@ -113,6 +120,11 @@ class FakeLikePage:
 
     def evaluate(self, script: str):
         self.page_evaluate_calls.append(script)
+        if "#dialog-holder" in script:
+            if not self.dialog_present:
+                return {"found": False, "dismissed": False, "method": ""}
+            self.dialog_present = False
+            return {"found": True, "dismissed": True, "method": "close-button"}
         return None
 
 
@@ -277,6 +289,7 @@ def test_click_like_skips_already_liked_posts_and_clicks_next_candidate(monkeypa
     assert target_button.last_timeout == main.LIKE_BUTTON_CLICK_TIMEOUT_MS
     assert page.expect_response_calls == [main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS]
     assert page.page_evaluate_calls == [
+        main.DISMISS_BLOCKING_DIALOG_SCRIPT,
         main.LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT,
         main.LIKE_RESTORE_HEADER_POINTER_EVENTS_SCRIPT,
     ]
@@ -390,6 +403,52 @@ def test_click_like_skips_candidate_missing_from_dom(monkeypatch):
     )
 
 
+def test_click_like_dismisses_blocking_dialog_before_click(monkeypatch):
+    target_button = FakeButton()
+    response = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('222')}",
+        200,
+        "{}",
+        {"current_user_reaction": {"id": "heart"}},
+    )
+    page = FakeLikePage(
+        {
+            main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
+            scoped_click_target_selector("222"): [target_button],
+        },
+        [response],
+        dialog_present=True,
+    )
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+    browser.request_kwargs = {}
+    browser.session = FakeSession(
+        get_routes={
+            "https://linux.do/t/topic/1934859.json": [
+                FakeResponse(
+                    "https://linux.do/t/topic/1934859.json",
+                    200,
+                    json_data={
+                        "post_stream": {
+                            "posts": [
+                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+                            ]
+                        }
+                    },
+                )
+            ],
+        },
+    )
+    browser._sync_browser_cookies_to_session = lambda: None
+
+    monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    browser.click_like(page)
+
+    assert target_button.click_count == 1
+    assert main.DISMISS_BLOCKING_DIALOG_SCRIPT in page.page_evaluate_calls
+
+
 def test_click_like_retries_trusted_click_when_pointer_intercepted(monkeypatch):
     target_button = FakeButton(
         click_errors=[
@@ -447,6 +506,7 @@ def test_click_like_retries_trusted_click_when_pointer_intercepted(monkeypatch):
         main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
     ]
     assert page.page_evaluate_calls == [
+        main.DISMISS_BLOCKING_DIALOG_SCRIPT,
         main.LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT,
         main.LIKE_RESTORE_HEADER_POINTER_EVENTS_SCRIPT,
         main.LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT,
