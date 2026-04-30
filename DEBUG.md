@@ -2,41 +2,36 @@
 
 ## Observations
 
-- GitHub Actions 日志显示登录成功、页面成功识别到点赞按钮，但 `PUT /discourse-reactions/posts/{id}/custom-reactions/heart/toggle.json` 连续返回 403。
-- 当前实现并不是真点页面按钮，而是先读取主题 JSON，再用 `curl_cffi` 的 `session.put(...)` 逐个对候选 `post_id` 发点赞请求。
-- 用 `js-reverse` 连本地已登录 Chrome 现场验证后，真实页面点赞链路可以成功，且页面 DOM 自带 `meta[name='csrf-token']`。
-- 真实 `toggle.json` 成功响应体里已包含 `current_user_reaction` / `current_user_used_main_reaction`，不需要再额外 `GET /posts/{id}` 确认。
+- GitHub Actions 日志显示登录成功、页面成功识别到点赞按钮，但点赞 API 会返回 403。
+- 第一轮改成页面上下文 `fetch` 后，返回体不再是空，而是 Cloudflare challenge HTML（`Just a moment...`）。
+- 这说明失败的不只是外部 `curl_cffi` 重放，连页面内裸 `fetch` 也不是站点认可的真实交互链。
+- 用 `js-reverse` 连本地已登录 Chrome 现场验证后，真实页面按钮点击可以成功触发点赞链路。
 
 ## Hypotheses
 
-### H1: GitHub Actions 上被拒绝的是外部 HTTP 重放链路，而非浏览器页面链路（ROOT HYPOTHESIS）
-- Supports: Action 中 selector 已成功，但脚本自发的 `session.put(...)` 连续 403；本地真实页面点击可成功。
+### H1: GitHub Actions 上被拒绝的是“手工构造请求”的点赞链，而不是登录态本身（ROOT HYPOTHESIS）
+- Supports: selector 成功、主题 JSON 成功，但外部 `session.put(...)` 与页面内 `fetch(...)` 都会触发 403/challenge；真实按钮点击最贴近现场成功链路。
 - Conflicts: 无关键冲突证据残留。
-- Test: 已把点赞执行改为页面上下文 `fetch`，并用单测覆盖成功/403 重试语义。
+- Test: 已将点赞执行改为候选 `post_id` 对应真实按钮点击，并用自动化测试覆盖相关路径。
 
-### H2: `/session/csrf` 是多余且脆弱的一跳
-- Supports: 本地真实页面 DOM 已有 csrf token；真实页面点赞不依赖额外 `/session/csrf` 请求。
+### H2: 主题 JSON 候选筛选仍然有价值，问题只在执行口径
+- Supports: 候选筛选能避免误把旧赞点成取消赞；失败集中发生在请求链而非筛选链。
 - Conflicts: 无。
-- Test: 已改为直接读取页面 `meta[name='csrf-token']`。
-
-### H3: `GET /posts/{id}` 二次确认把已成功的点赞误判为失败
-- Supports: `toggle.json` 响应体本身已经能确认当前用户反应状态。
-- Conflicts: 无。
-- Test: 已改为直接根据 `toggle.json` 返回体判成功。
+- Test: 已保留筛选逻辑，只替换执行方式。
 
 ## Experiments
 
-- 已完成：使用 `js-reverse` 连本地已登录 Chrome，抓到真实 `PUT /discourse-reactions/posts/{id}/custom-reactions/heart/toggle.json` 成功请求与返回体。
-- 已完成：验证页面存在 `meta[name='csrf-token']`。
-- 已完成：将点赞执行改为页面上下文 `fetch`，并补单测验证成功、403 重试、缺失可见按钮时仍可按候选帖子执行。
+- 已完成：使用 `js-reverse` 连本地已登录 Chrome，抓到真实页面点赞链路与 `Just a moment...` challenge 现象。
+- 已完成：验证页面上下文裸 `fetch` 仍会被 challenge。
+- 已完成：将点赞执行切换为候选按钮真实点击，补齐候选楼层缺失、403 重试、指针遮挡降级等单测。
 
 ## Root Cause
 
-- GitHub Actions 上失败的不是页面登录态，而是脚本使用 `curl_cffi` 在浏览器上下文之外重放 `PUT toggle.json` 的点赞链路；这条链路会被服务端拒绝并返回 403。
+- GitHub Actions 上失败的不是登录态，而是脚本自己构造的点赞请求链路；无论是外部 `curl_cffi` 重放，还是页面内裸 `fetch`，都可能被 Cloudflare/站点风控拒绝。真正更接近现场成功行为的是点击候选楼层对应的真实页面按钮。
 
 ## Fix
 
-- 保留主题 JSON 的候选帖子筛选逻辑，避免误点已点赞帖子。
-- 删除点赞主链对 `/session/csrf` 与 `GET /posts/{id}` 的依赖。
-- 改为直接在页面上下文里读取 `meta[name='csrf-token']`，并用页面内 `fetch` 发送 `PUT /discourse-reactions/posts/{id}/custom-reactions/heart/toggle.json`。
-- 直接依据 `toggle.json` 返回体中的 `current_user_reaction` / `current_user_used_main_reaction` 判定成功。
+- 保留主题 JSON 候选帖子筛选逻辑，只对未点赞候选帖子尝试操作。
+- 删除页面内裸 `fetch` 主线，改为在当前 DOM 中匹配候选 `post_id` 对应的真实点赞按钮并点击。
+- 点击时保留滚动到视口中部、等待页面稳定、拦截响应、遮挡时降级为 DOM click 的处理。
+- 直接依据真实按钮触发后的网络响应内容判断成功；候选楼层不在当前 DOM 时跳过到下一个候选。

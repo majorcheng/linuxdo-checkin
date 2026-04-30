@@ -1,13 +1,13 @@
 - [x] 复核线上 `main` 与本地 `HEAD` 一致，确认当前基线可直接调试
 - [x] 用 `js-reverse` 连已登录 Chrome，验证真实点赞链路与 403 现象
-- [x] 将点赞执行从 `curl_cffi` 外部重放改为页面上下文 `fetch`
-- [x] 移除点赞主链对 `/session/csrf` 与 `GET /posts/{id}` 的额外依赖
-- [x] 更新点赞相关单测，覆盖页面上下文点赞成功与 403 重试
+- [x] 将点赞执行从外部 `curl_cffi` 重放切到页面内真实按钮点击
+- [x] 保留主题 JSON 候选筛选，避免把已点赞帖子误点成取消赞
+- [x] 更新点赞相关单测，覆盖候选楼层缺失、403 重试与真实按钮点击
 - [x] 运行最小充分验证并记录结果
 
 ## 复盘小结
 
-- 根因不是登录，也不是按钮 selector，而是 GitHub Actions 上的外部 HTTP 重放点赞链路会被服务端 403 拒绝。
-- 保留主题 JSON 候选筛选可以继续避免误把旧赞点成取消赞；真正需要替换的是执行口径。
-- 当前最小修复是让候选 `post_id` 仍来自主题 JSON，但真正的 `PUT toggle.json` 改为在页面上下文里执行，并直接依据返回体判成功。
-- 验证结果：`python -m py_compile main.py tests/test_like_behavior.py` 通过，`python -m pytest -q` 为 `31 passed`。
+- 根因不是登录，也不是 selector，而是 Cloudflare/站点会拒绝脚本构造的点赞请求链路；即使页面内裸 `fetch` 也仍会被 challenge。
+- 这次最小可行修复是：继续用主题 JSON 决定“谁能点”，但真正“怎么点”改成点击候选 `post_id` 对应的真实页面按钮。
+- 这样既保留了避免误取消旧赞的筛选保护，又贴近真实页面交互链。
+- 验证结果：`python -m py_compile main.py tests/test_like_behavior.py` 通过，`python -m pytest -q` 为 `33 passed`。

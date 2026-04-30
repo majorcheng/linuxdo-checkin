@@ -9,11 +9,34 @@ from main import (
     extract_like_action_summary,
     is_like_toggle_response_success,
     is_likeable_post_payload,
+    is_pointer_intercept_error,
 )
 
 
 class FakeButton:
-    pass
+    def __init__(
+        self,
+        visible: bool = True,
+        click_error: Exception | None = None,
+    ) -> None:
+        self.visible = visible
+        self.click_count = 0
+        self.last_timeout = None
+        self.click_error = click_error
+        self.evaluate_calls = []
+
+    def is_visible(self) -> bool:
+        return self.visible
+
+    def click(self, timeout=None) -> None:
+        if self.click_error is not None:
+            raise self.click_error
+        self.click_count += 1
+        self.last_timeout = timeout
+
+    def evaluate(self, script: str):
+        self.evaluate_calls.append(script)
+        return None
 
 
 class FakeLocator:
@@ -31,8 +54,8 @@ class FakeResponse:
     def __init__(self, url: str, status: int, text: str = "", json_data=None) -> None:
         self.url = url
         self.status = status
-        self._text = text
         self.status_code = status
+        self._text = text
         self._json_data = json_data
 
     def text(self) -> str:
@@ -44,36 +67,47 @@ class FakeResponse:
         return self._json_data
 
 
+class FakeResponseInfo:
+    def __init__(self, response_factory) -> None:
+        self._response_factory = response_factory
+        self.value = None
+
+    def __enter__(self):
+        self.value = self._response_factory()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 class FakeLikePage:
-    def __init__(
-        self,
-        selector_map,
-        toggle_results=None,
-        csrf_token: str = "csrf-token",
-        url: str = "https://linux.do/t/topic/1934859",
-    ) -> None:
+    def __init__(self, selector_map, responses=None, url: str = "https://linux.do/t/topic/1934859") -> None:
         self.selector_map = selector_map
-        self.toggle_results = toggle_results or {}
-        self.csrf_token = csrf_token
+        self.responses = list(responses or [])
         self.url = url
         self.locator_calls = []
-        self.evaluate_calls = []
-        self.toggle_endpoints = []
+        self.expect_response_calls = []
+        self.wait_timeout_calls = []
 
     def locator(self, selector: str) -> FakeLocator:
         self.locator_calls.append(selector)
         return FakeLocator(self.selector_map.get(selector, []))
 
-    def evaluate(self, script: str, arg=None):
-        self.evaluate_calls.append((script, arg))
-        if "meta[name='csrf-token']" in script:
-            return self.csrf_token
-        if "fetch(endpoint" in script:
-            endpoint = arg["endpoint"]
-            self.toggle_endpoints.append(endpoint)
-            assert endpoint in self.toggle_results, f"unexpected endpoint {endpoint}"
-            return self.toggle_results[endpoint]
-        raise AssertionError(f"unexpected evaluate script: {script}")
+    def expect_response(self, predicate, timeout=None) -> FakeResponseInfo:
+        self.expect_response_calls.append(timeout)
+
+        def factory():
+            assert self.responses, "no fake responses left"
+            while self.responses:
+                response = self.responses.pop(0)
+                if predicate(response) is True:
+                    return response
+            raise AssertionError("no matching fake response found")
+
+        return FakeResponseInfo(factory)
+
+    def wait_for_timeout(self, timeout: int) -> None:
+        self.wait_timeout_calls.append(timeout)
 
 
 class FakeSession:
@@ -118,6 +152,10 @@ class FakeContext:
 class FakeBrowser:
     def __init__(self, page) -> None:
         self.context = FakeContext(page)
+
+
+def scoped_like_selector(post_id: str) -> str:
+    return f"article[data-post-id='{post_id}'] {main.LIKE_BUTTON_SELECTORS[0]}"
 
 
 def test_build_topic_json_url_keeps_canonical_topic_path():
@@ -179,22 +217,25 @@ def test_build_like_toggle_response_preview_prefers_api_errors():
     assert build_like_toggle_response_preview({"payload": {}, "preview": "abc"}) == "abc"
 
 
-def test_click_like_skips_already_liked_posts_and_likes_next_candidate(monkeypatch):
-    endpoint = build_like_toggle_fragment("222")
+def test_is_pointer_intercept_error_matches_current_message():
+    assert is_pointer_intercept_error(RuntimeError("foo intercepts pointer events bar"))
+    assert not is_pointer_intercept_error(RuntimeError("other error"))
+
+
+def test_click_like_skips_already_liked_posts_and_clicks_next_candidate(monkeypatch):
+    target_button = FakeButton()
+    response = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('222')}",
+        200,
+        "{}",
+        {"current_user_reaction": {"id": "heart"}},
+    )
     page = FakeLikePage(
-        {main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()]},
-        toggle_results={
-            endpoint: {
-                "ok": True,
-                "payload": {
-                    "current_user_reaction": {"id": "heart"},
-                    "current_user_used_main_reaction": True,
-                },
-                "preview": "",
-                "responseUrl": f"https://linux.do{endpoint}",
-                "status": 200,
-            }
+        {
+            main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
+            scoped_like_selector("222"): [target_button],
         },
+        [response],
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
@@ -226,34 +267,32 @@ def test_click_like_skips_already_liked_posts_and_likes_next_candidate(monkeypat
     assert [url for url, _kwargs in browser.session.get_calls] == [
         "https://linux.do/t/topic/1934859.json"
     ]
-    assert page.toggle_endpoints == [endpoint]
-    assert page.locator_calls[0] == main.LIKE_BUTTON_SELECTORS[0]
+    assert target_button.click_count == 1
+    assert target_button.last_timeout == main.LIKE_BUTTON_CLICK_TIMEOUT_MS
+    assert page.expect_response_calls == [main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS]
 
 
 def test_click_like_retries_next_candidate_after_403(monkeypatch):
-    endpoint_111 = build_like_toggle_fragment("111")
-    endpoint_222 = build_like_toggle_fragment("222")
+    first_button = FakeButton()
+    second_button = FakeButton()
+    response_111 = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('111')}",
+        403,
+        "<html>Just a moment...</html>",
+    )
+    response_222 = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('222')}",
+        200,
+        "{}",
+        {"current_user_used_main_reaction": True},
+    )
     page = FakeLikePage(
-        {main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()]},
-        toggle_results={
-            endpoint_111: {
-                "ok": False,
-                "payload": {"errors": ["forbidden"]},
-                "preview": "",
-                "responseUrl": f"https://linux.do{endpoint_111}",
-                "status": 403,
-            },
-            endpoint_222: {
-                "ok": True,
-                "payload": {
-                    "current_user_reaction": {"id": "heart"},
-                    "current_user_used_main_reaction": True,
-                },
-                "preview": "",
-                "responseUrl": f"https://linux.do{endpoint_222}",
-                "status": 200,
-            },
+        {
+            main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
+            scoped_like_selector("111"): [first_button],
+            scoped_like_selector("222"): [second_button],
         },
+        [response_111, response_222],
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
@@ -282,22 +321,79 @@ def test_click_like_retries_next_candidate_after_403(monkeypatch):
 
     browser.click_like(page)
 
-    assert page.toggle_endpoints == [endpoint_111, endpoint_222]
+    assert first_button.click_count == 1
+    assert second_button.click_count == 1
+    assert page.expect_response_calls == [
+        main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
+        main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
+    ]
 
 
-def test_click_like_keeps_trying_when_selector_temporarily_missing(monkeypatch):
-    endpoint = build_like_toggle_fragment("222")
+def test_click_like_skips_candidate_missing_from_dom(monkeypatch):
+    target_button = FakeButton()
+    response = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('222')}",
+        200,
+        "{}",
+        {"current_user_reaction": {"id": "heart"}},
+    )
     page = FakeLikePage(
-        {},
-        toggle_results={
-            endpoint: {
-                "ok": True,
-                "payload": {"current_user_reaction": {"id": "heart"}},
-                "preview": "",
-                "responseUrl": f"https://linux.do{endpoint}",
-                "status": 200,
-            }
+        {
+            main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
+            scoped_like_selector("222"): [target_button],
         },
+        [response],
+    )
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+    browser.request_kwargs = {}
+    browser.session = FakeSession(
+        get_routes={
+            "https://linux.do/t/topic/1934859.json": [
+                FakeResponse(
+                    "https://linux.do/t/topic/1934859.json",
+                    200,
+                    json_data={
+                        "post_stream": {
+                            "posts": [
+                                {"id": 111, "actions_summary": [{"id": 2, "can_act": True}]},
+                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+                            ]
+                        }
+                    },
+                )
+            ],
+        },
+    )
+    browser._sync_browser_cookies_to_session = lambda: None
+
+    monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    browser.click_like(page)
+
+    assert target_button.click_count == 1
+    missing_candidate_calls = [
+        call for call in page.locator_calls if call.startswith("article[data-post-id='111'] ")
+    ]
+    assert len(missing_candidate_calls) == len(main.LIKE_BUTTON_SELECTORS)
+
+
+def test_click_like_falls_back_to_dom_click_when_pointer_intercepted(monkeypatch):
+    target_button = FakeButton(
+        click_error=RuntimeError("Locator.click: Timeout 3000ms exceeded. <div> intercepts pointer events")
+    )
+    response = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('222')}",
+        200,
+        "{}",
+        {"current_user_reaction": {"id": "heart"}},
+    )
+    page = FakeLikePage(
+        {
+            main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
+            scoped_like_selector("222"): [target_button],
+        },
+        [response],
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
@@ -325,7 +421,11 @@ def test_click_like_keeps_trying_when_selector_temporarily_missing(monkeypatch):
 
     browser.click_like(page)
 
-    assert page.toggle_endpoints == [endpoint]
+    assert target_button.click_count == 0
+    assert target_button.evaluate_calls == [
+        "(el) => el.scrollIntoView({block: 'center', inline: 'center'})",
+        "(el) => el.click()",
+    ]
 
 
 @pytest.mark.parametrize(
