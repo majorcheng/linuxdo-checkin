@@ -245,6 +245,11 @@ LIKE_TOGGLE_URL_KEYWORDS = (
 LIKE_BUTTON_CLICK_TIMEOUT_MS = 3_000
 LIKE_BUTTON_RESPONSE_TIMEOUT_MS = 8_000
 LIKE_BUTTON_SETTLE_TIMEOUT_MS = 150
+LIKE_BUTTON_REPOSITION_STEPS = (
+    "(el) => el.scrollIntoView({block: 'center', inline: 'center'})",
+    "(el) => el.scrollIntoView({block: 'end', inline: 'center'})",
+    "(el) => el.scrollIntoView({block: 'start', inline: 'center'})",
+)
 
 def retry_decorator(retries: int = 3, min_delay: int = 5, max_delay: int = 10):
     def decorator(func):
@@ -1390,6 +1395,18 @@ class LinuxDoBrowser:
                     continue
         return None, ""
 
+    def _prepare_candidate_like_button(
+        self,
+        page: Any,
+        button: Any,
+        script: str,
+    ) -> None:
+        button.evaluate(script)
+        try:
+            page.wait_for_timeout(LIKE_BUTTON_SETTLE_TIMEOUT_MS)
+        except Exception:
+            time.sleep(LIKE_BUTTON_SETTLE_TIMEOUT_MS / 1000)
+
     def _click_candidate_like_button(
         self,
         page: Any,
@@ -1400,30 +1417,39 @@ class LinuxDoBrowser:
         endpoint_fragment = build_like_toggle_fragment(post_id)
         if not endpoint_fragment:
             raise RuntimeError("候选 post_id 为空，无法点击点赞按钮")
-        try:
-            button.evaluate(
-                "(el) => el.scrollIntoView({block: 'center', inline: 'center'})"
-            )
-        except Exception:
-            pass
-        try:
-            page.wait_for_timeout(LIKE_BUTTON_SETTLE_TIMEOUT_MS)
-        except Exception:
-            time.sleep(LIKE_BUTTON_SETTLE_TIMEOUT_MS / 1000)
-        with page.expect_response(
-            lambda response: endpoint_fragment in (getattr(response, "url", "") or ""),
-            timeout=LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
-        ) as response_info:
+
+        last_intercept_error: Optional[Exception] = None
+        for attempt_index, script in enumerate(LIKE_BUTTON_REPOSITION_STEPS, start=1):
             try:
-                button.click(timeout=LIKE_BUTTON_CLICK_TIMEOUT_MS)
+                self._prepare_candidate_like_button(page, button, script)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"候选按钮点击前定位失败: selector={selector}, post_id={post_id}, error={str(exc)}"
+                ) from exc
+
+            try:
+                with page.expect_response(
+                    lambda response: endpoint_fragment
+                    in (getattr(response, "url", "") or ""),
+                    timeout=LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
+                ) as response_info:
+                    button.click(timeout=LIKE_BUTTON_CLICK_TIMEOUT_MS)
             except Exception as exc:
                 if not is_pointer_intercept_error(exc):
                     raise
+                last_intercept_error = exc
                 logger.info(
-                    f"原生点赞点击被页面遮挡，降级为 DOM click: selector={selector}, post_id={post_id}"
+                    "原生点赞点击被页面遮挡，重新调整位置后重试: "
+                    f"selector={selector}, post_id={post_id}, attempt={attempt_index}/{len(LIKE_BUTTON_REPOSITION_STEPS)}"
                 )
-                button.evaluate("(el) => el.click()")
-        return response_info.value
+                continue
+
+            return response_info.value
+
+        raise RuntimeError(
+            "候选按钮持续被页面遮挡，未执行 DOM click 兜底: "
+            f"selector={selector}, post_id={post_id}, last_error={str(last_intercept_error) if last_intercept_error else '<none>'}"
+        )
 
     def click_like(self, page: Any) -> None:
         selector = self._find_like_button_selector(page)

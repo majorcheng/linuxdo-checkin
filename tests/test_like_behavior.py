@@ -17,20 +17,20 @@ class FakeButton:
     def __init__(
         self,
         visible: bool = True,
-        click_error: Exception | None = None,
+        click_errors: list[Exception] | None = None,
     ) -> None:
         self.visible = visible
         self.click_count = 0
         self.last_timeout = None
-        self.click_error = click_error
+        self.click_errors = list(click_errors or [])
         self.evaluate_calls = []
 
     def is_visible(self) -> bool:
         return self.visible
 
     def click(self, timeout=None) -> None:
-        if self.click_error is not None:
-            raise self.click_error
+        if self.click_errors:
+            raise self.click_errors.pop(0)
         self.click_count += 1
         self.last_timeout = timeout
 
@@ -73,10 +73,11 @@ class FakeResponseInfo:
         self.value = None
 
     def __enter__(self):
-        self.value = self._response_factory()
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self.value = self._response_factory()
         return False
 
 
@@ -378,9 +379,13 @@ def test_click_like_skips_candidate_missing_from_dom(monkeypatch):
     assert len(missing_candidate_calls) == len(main.LIKE_BUTTON_SELECTORS)
 
 
-def test_click_like_falls_back_to_dom_click_when_pointer_intercepted(monkeypatch):
+def test_click_like_retries_trusted_click_when_pointer_intercepted(monkeypatch):
     target_button = FakeButton(
-        click_error=RuntimeError("Locator.click: Timeout 3000ms exceeded. <div> intercepts pointer events")
+        click_errors=[
+            RuntimeError(
+                "Locator.click: Timeout 3000ms exceeded. <div> intercepts pointer events"
+            )
+        ]
     )
     response = FakeResponse(
         f"https://linux.do{build_like_toggle_fragment('222')}",
@@ -421,10 +426,79 @@ def test_click_like_falls_back_to_dom_click_when_pointer_intercepted(monkeypatch
 
     browser.click_like(page)
 
-    assert target_button.click_count == 0
+    assert target_button.click_count == 1
     assert target_button.evaluate_calls == [
         "(el) => el.scrollIntoView({block: 'center', inline: 'center'})",
-        "(el) => el.click()",
+        "(el) => el.scrollIntoView({block: 'end', inline: 'center'})",
+    ]
+    assert page.expect_response_calls == [
+        main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
+        main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
+    ]
+
+
+def test_click_like_skips_candidate_when_pointer_intercept_persists(monkeypatch):
+    first_button = FakeButton(
+        click_errors=[
+            RuntimeError(
+                "Locator.click: Timeout 3000ms exceeded. <div> intercepts pointer events"
+            ),
+            RuntimeError(
+                "Locator.click: Timeout 3000ms exceeded. <div> intercepts pointer events"
+            ),
+            RuntimeError(
+                "Locator.click: Timeout 3000ms exceeded. <div> intercepts pointer events"
+            ),
+        ]
+    )
+    second_button = FakeButton()
+    response = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('222')}",
+        200,
+        "{}",
+        {"current_user_reaction": {"id": "heart"}},
+    )
+    page = FakeLikePage(
+        {
+            main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
+            scoped_like_selector("111"): [first_button],
+            scoped_like_selector("222"): [second_button],
+        },
+        [response],
+    )
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+    browser.request_kwargs = {}
+    browser.session = FakeSession(
+        get_routes={
+            "https://linux.do/t/topic/1934859.json": [
+                FakeResponse(
+                    "https://linux.do/t/topic/1934859.json",
+                    200,
+                    json_data={
+                        "post_stream": {
+                            "posts": [
+                                {"id": 111, "actions_summary": [{"id": 2, "can_act": True}]},
+                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+                            ]
+                        }
+                    },
+                )
+            ],
+        },
+    )
+    browser._sync_browser_cookies_to_session = lambda: None
+
+    monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    browser.click_like(page)
+
+    assert first_button.click_count == 0
+    assert second_button.click_count == 1
+    assert first_button.evaluate_calls == [
+        "(el) => el.scrollIntoView({block: 'center', inline: 'center'})",
+        "(el) => el.scrollIntoView({block: 'end', inline: 'center'})",
+        "(el) => el.scrollIntoView({block: 'start', inline: 'center'})",
     ]
 
 
