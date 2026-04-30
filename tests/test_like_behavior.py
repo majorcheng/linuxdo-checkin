@@ -140,16 +140,41 @@ class FakeLikePage:
         return None
 
 
-class FakeSession:
-    def __init__(self, get_routes=None) -> None:
-        self.get_routes = {key: list(value) for key, value in (get_routes or {}).items()}
-        self.get_calls = []
+class FakeTextLocator:
+    def __init__(self, text: str) -> None:
+        self.text = text
 
-    def get(self, url: str, **kwargs):
-        self.get_calls.append((url, kwargs))
-        responses = self.get_routes.get(url, [])
-        assert responses, f"unexpected GET {url}"
-        return responses.pop(0)
+    def inner_text(self, timeout=None) -> str:
+        return self.text
+
+
+class FakeFetchPage:
+    def __init__(self, url: str, title: str = "", body_text: str = "") -> None:
+        self.url = url
+        self._title = title
+        self._body_text = body_text
+
+    def title(self) -> str:
+        return self._title
+
+    def locator(self, selector: str):
+        assert selector == "body"
+        return FakeTextLocator(self._body_text)
+
+
+class FakeScraplingBrowser:
+    def __init__(self, pages=None) -> None:
+        self.pages = list(pages or [])
+        self.fetch_calls = []
+
+    def fetch(self, url: str, **kwargs):
+        self.fetch_calls.append((url, kwargs))
+        assert self.pages, "no fake fetch page configured"
+        page = self.pages.pop(0)
+        assert page.url == url
+        page_action = kwargs.get("page_action")
+        if page_action is not None:
+            page_action(page)
 
 
 class FakeTopicPage:
@@ -275,6 +300,46 @@ def test_response_looks_like_cloudflare_matches_challenge_html():
     assert not response_looks_like_cloudflare('{"ok":true}')
 
 
+def test_request_browser_json_uses_scrapling_context():
+    topic_json_url = "https://linux.do/t/topic/1934859.json"
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+    browser.browser = FakeScraplingBrowser(
+        [
+            FakeFetchPage(
+                topic_json_url,
+                body_text='{"post_stream":{"posts":[{"id":222,"actions_summary":[{"id":2,"can_act":true}]}]}}',
+            )
+        ]
+    )
+
+    payload = browser._request_browser_json(
+        topic_json_url,
+        referer_url="https://linux.do/t/topic/1934859",
+    )
+
+    assert payload["post_stream"]["posts"][0]["id"] == 222
+    fetch_url, fetch_kwargs = browser.browser.fetch_calls[0]
+    assert fetch_url == topic_json_url
+    assert fetch_kwargs["solve_cloudflare"] is True
+    assert fetch_kwargs["extra_headers"] == {"Referer": "https://linux.do/t/topic/1934859"}
+
+
+def test_request_browser_json_rejects_cloudflare_html():
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+    browser.browser = FakeScraplingBrowser(
+        [
+            FakeFetchPage(
+                "https://linux.do/t/topic/1934859.json",
+                title="Just a moment...",
+                body_text="Enable JavaScript and cookies to continue",
+            )
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="Cloudflare challenge"):
+        browser._request_browser_json("https://linux.do/t/topic/1934859.json")
+
+
 def test_create_browser_session_respects_browser_mode(monkeypatch):
     class DummyStealthSession:
         def __init__(self, **kwargs) -> None:
@@ -315,34 +380,20 @@ def test_click_like_skips_already_liked_posts_and_clicks_next_candidate(monkeypa
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
-    browser.session = FakeSession(
-        get_routes={
-            "https://linux.do/t/topic/1934859.json": [
-                FakeResponse(
-                    "https://linux.do/t/topic/1934859.json",
-                    200,
-                    json_data={
-                        "post_stream": {
-                            "posts": [
-                                {"id": 111, "actions_summary": [{"id": 2, "acted": True}]},
-                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
-                            ]
-                        }
-                    },
-                )
-            ],
-        },
-    )
-    browser._sync_browser_cookies_to_session = lambda: None
+    browser._request_browser_json = lambda url, referer_url="": {
+        "post_stream": {
+            "posts": [
+                {"id": 111, "actions_summary": [{"id": 2, "acted": True}]},
+                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+            ]
+        }
+    }
 
     monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
     monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
 
     browser.click_like(page)
 
-    assert [url for url, _kwargs in browser.session.get_calls] == [
-        "https://linux.do/t/topic/1934859.json"
-    ]
     assert target_button.click_count == 1
     assert target_button.last_timeout == main.LIKE_BUTTON_CLICK_TIMEOUT_MS
     assert page.expect_response_calls == [main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS]
@@ -377,25 +428,14 @@ def test_click_like_retries_next_candidate_after_403(monkeypatch):
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
-    browser.session = FakeSession(
-        get_routes={
-            "https://linux.do/t/topic/1934859.json": [
-                FakeResponse(
-                    "https://linux.do/t/topic/1934859.json",
-                    200,
-                    json_data={
-                        "post_stream": {
-                            "posts": [
-                                {"id": 111, "actions_summary": [{"id": 2, "can_act": True}]},
-                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
-                            ]
-                        }
-                    },
-                )
-            ],
-        },
-    )
-    browser._sync_browser_cookies_to_session = lambda: None
+    browser._request_browser_json = lambda url, referer_url="": {
+        "post_stream": {
+            "posts": [
+                {"id": 111, "actions_summary": [{"id": 2, "can_act": True}]},
+                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+            ]
+        }
+    }
 
     monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
     monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
@@ -433,24 +473,13 @@ def test_click_like_retries_same_candidate_after_cloudflare_recovery(monkeypatch
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
-    browser.session = FakeSession(
-        get_routes={
-            "https://linux.do/t/topic/1934859.json": [
-                FakeResponse(
-                    "https://linux.do/t/topic/1934859.json",
-                    200,
-                    json_data={
-                        "post_stream": {
-                            "posts": [
-                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
-                            ]
-                        }
-                    },
-                )
-            ],
-        },
-    )
-    browser._sync_browser_cookies_to_session = lambda: None
+    browser._request_browser_json = lambda url, referer_url="": {
+        "post_stream": {
+            "posts": [
+                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+            ]
+        }
+    }
     fetch_calls = []
     browser._fetch_page_snapshot = (
         lambda url, include_auth_signals=False, solve_cloudflare=None: fetch_calls.append(
@@ -487,25 +516,14 @@ def test_click_like_skips_candidate_missing_from_dom(monkeypatch):
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
-    browser.session = FakeSession(
-        get_routes={
-            "https://linux.do/t/topic/1934859.json": [
-                FakeResponse(
-                    "https://linux.do/t/topic/1934859.json",
-                    200,
-                    json_data={
-                        "post_stream": {
-                            "posts": [
-                                {"id": 111, "actions_summary": [{"id": 2, "can_act": True}]},
-                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
-                            ]
-                        }
-                    },
-                )
-            ],
-        },
-    )
-    browser._sync_browser_cookies_to_session = lambda: None
+    browser._request_browser_json = lambda url, referer_url="": {
+        "post_stream": {
+            "posts": [
+                {"id": 111, "actions_summary": [{"id": 2, "can_act": True}]},
+                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+            ]
+        }
+    }
 
     monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
     monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
@@ -539,24 +557,13 @@ def test_click_like_dismisses_blocking_dialog_before_click(monkeypatch):
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
-    browser.session = FakeSession(
-        get_routes={
-            "https://linux.do/t/topic/1934859.json": [
-                FakeResponse(
-                    "https://linux.do/t/topic/1934859.json",
-                    200,
-                    json_data={
-                        "post_stream": {
-                            "posts": [
-                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
-                            ]
-                        }
-                    },
-                )
-            ],
-        },
-    )
-    browser._sync_browser_cookies_to_session = lambda: None
+    browser._request_browser_json = lambda url, referer_url="": {
+        "post_stream": {
+            "posts": [
+                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+            ]
+        }
+    }
 
     monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
     monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
@@ -590,24 +597,13 @@ def test_click_like_retries_trusted_click_when_pointer_intercepted(monkeypatch):
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
-    browser.session = FakeSession(
-        get_routes={
-            "https://linux.do/t/topic/1934859.json": [
-                FakeResponse(
-                    "https://linux.do/t/topic/1934859.json",
-                    200,
-                    json_data={
-                        "post_stream": {
-                            "posts": [
-                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
-                            ]
-                        }
-                    },
-                )
-            ],
-        },
-    )
-    browser._sync_browser_cookies_to_session = lambda: None
+    browser._request_browser_json = lambda url, referer_url="": {
+        "post_stream": {
+            "posts": [
+                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+            ]
+        }
+    }
 
     monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
     monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
@@ -663,25 +659,14 @@ def test_click_like_skips_candidate_when_pointer_intercept_persists(monkeypatch)
     )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
-    browser.session = FakeSession(
-        get_routes={
-            "https://linux.do/t/topic/1934859.json": [
-                FakeResponse(
-                    "https://linux.do/t/topic/1934859.json",
-                    200,
-                    json_data={
-                        "post_stream": {
-                            "posts": [
-                                {"id": 111, "actions_summary": [{"id": 2, "can_act": True}]},
-                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
-                            ]
-                        }
-                    },
-                )
-            ],
-        },
-    )
-    browser._sync_browser_cookies_to_session = lambda: None
+    browser._request_browser_json = lambda url, referer_url="": {
+        "post_stream": {
+            "posts": [
+                {"id": 111, "actions_summary": [{"id": 2, "can_act": True}]},
+                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+            ]
+        }
+    }
 
     monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
     monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)

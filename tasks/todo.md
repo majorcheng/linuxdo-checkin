@@ -11,6 +11,7 @@
 - [x] 跟踪 headed + real Chrome 回归日志，确认浏览器模式切换已生效但点赞仍未成功
 - [x] 移除 Action 代理出口并再次触发 `Daily Check-in`，确认 runner 直连会在主页持续命中 429
 - [x] 为点赞 403 challenge 增加显式恢复与同一候选单次重试，并补单测
+- [x] 将候选帖子读取从 `curl_cffi session.get(topic.json)` 迁到 Scrapling 浏览器上下文
 - [ ] 恢复代理浏览前提后再次触发 `Daily Check-in`，验证 challenge 恢复链路是否能打通点赞
 - [ ] 跟踪最新 workflow 日志，确认出现至少一次“点赞成功”
 
@@ -23,3 +24,4 @@
 - `headed + real Chrome + xvfb-run` 已在 Action 中生效，但 challenge 仍然存在；这否定了“只要摆脱 headless Chromium 就能成功”的假设。
 - runner 直连会在主页持续命中 `429`，因此代理浏览前提不能去掉；这否定了“直接去代理就能收口”的假设。
 - 当前轮次新的最小实验是：保留代理浏览前提，但在点赞命中 `403 / Just a moment...` 后显式执行一次 Cloudflare 恢复，再重试同一候选帖子。
+- 用户提出“既然登录和浏览都用 Scrapling，是否所有环节都统一到 Scrapling”，这个方向成立；本轮已把候选帖子读取也统一到浏览器上下文，进一步消除了点赞链路里的指纹混用点。

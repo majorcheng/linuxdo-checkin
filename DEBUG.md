@@ -9,6 +9,7 @@
 - 当前 `main.py` 仍通过 Scrapling `StealthySession(headless=True, real_chrome=False)` 启动浏览器；而我此前用本地真实 Chrome 做 live 对照时，真实点赞链路可成功。
 - 将 Action 切到 `headed + real Chrome` 后，日志已确认 `headless=0, real_chrome=1`，但点赞请求依然返回 challenge；同一轮日志同时显示 `proxy=on`，且代理是 `https://` 出口。
 - 将 Action 临时改成 runner 直连后，主页不再返回点赞 challenge，但开始连续出现 `GET https://linux.do/ -> 429`，最终无法拿到主题帖，说明直连无法替代当前代理出口。
+- 当前点赞链路里，候选帖子读取仍在走 `self.session.get(topic.json)`；虽然浏览和真实点击都已切到 Scrapling 浏览器，但这一步仍然是浏览器外部的 `curl_cffi` 会话。
 - 这说明失败的不只是外部 `curl_cffi` 重放，连页面内裸 `fetch` 与 `DOM click` 也不是站点认可的真实交互链；在可信 pointer click 已成立后，剩余差异进一步收敛到 CI 浏览器环境本身。
 
 ## Hypotheses
@@ -38,6 +39,11 @@
 - Conflicts: 还没有在 GitHub Actions 上验证“收到 challenge 后先 solve 再重试同一候选”是否足以成功点赞。
 - Test: 保持代理与 headed real Chrome，新增 challenge HTML 识别、`solve_cloudflare=True` 恢复与同一候选一次受控重试，再跑一轮 `Daily Check-in`。
 
+### H6: 候选帖子读取仍混用 `curl_cffi session.get(topic.json)`，浏览器外指纹差异会继续放大 challenge 风险（ROOT HYPOTHESIS）
+- Supports: 用户明确指出登录和浏览都已经在 Scrapling 浏览器里；现有点赞链路只有候选帖子读取仍在浏览器外进行，属于最后一段上下文不一致；把读取态也统一到 Scrapling 更符合当前证据收敛方向。
+- Conflicts: 还没有在 GitHub Actions 上验证“候选帖子读取也改到 Scrapling”是否会提升点赞成功率。
+- Test: 删除 `self.session.get(topic.json)` 路径，改用 Scrapling 浏览器上下文读取主题 JSON，并保持真实按钮点击与 challenge 恢复逻辑不变。
+
 ## Experiments
 
 - 已完成：使用 `js-reverse` 连本地已登录 Chrome，抓到真实页面点赞链路与 `Just a moment...` challenge 现象。
@@ -47,10 +53,12 @@
 - 已完成：将 GitHub Actions 浏览器运行模式切到 `headed + real Chrome + xvfb-run`，但 challenge 仍存在，H3 被否定。
 - 已完成：移除 workflow 里的代理出口后，runner 直连首页持续 `429`、无法拿到主题帖，H4 被部分否定。
 - 进行中：保持代理浏览前提，在收到点赞 challenge 时显式恢复 Cloudflare 状态，并对同一候选只重试一次。
+- 已完成：把候选帖子读取从 `curl_cffi session.get(topic.json)` 迁到 Scrapling 浏览器上下文，并补齐新的浏览器读取单测。
 
 ## Root Cause
 
 - 当前已确认的根因分两层：第一层是脚本构造请求链路会被 challenge，因此必须走候选楼层真实按钮点击；第二层已经从“headless Chromium 差异”进一步收敛到“代理浏览前提下，点赞命中 challenge 后缺少显式恢复动作”。runner 直连虽然绕开了点赞 challenge，但会在主页立即触发 `429`，因此不能替代代理。
+- 额外的实现风险点也已经收口：只要候选帖子读取还留在浏览器外的 `curl_cffi` 会话里，点赞链路就仍然存在上下文不一致。当前已把这一步也统一到 Scrapling 浏览器上下文。
 
 ## Fix
 
@@ -61,3 +69,4 @@
 - 已完成：为浏览器启动增加显式 `LINUXDO_BROWSER_HEADLESS` / `LINUXDO_BROWSER_REAL_CHROME` 开关，并已在 GitHub Actions 中验证 `xvfb-run + headed + real Chrome` 生效。
 - 已完成：将 GitHub Actions 的点赞链路临时改走 runner 直连，确认主页会直接命中 `429`，因此该路不成立。
 - 进行中：保留代理浏览前提，新增“点赞 403 challenge → solve_cloudflare 恢复 → 同一候选单次重试”链路。
+- 已完成：将候选帖子读取统一到 Scrapling 浏览器上下文，删除点赞主链对 `self.session.get(topic.json)` 的依赖。

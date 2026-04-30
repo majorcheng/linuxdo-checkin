@@ -4,6 +4,7 @@ new Env("Linux.Do 签到")
 """
 
 import functools
+import json
 import os
 import random
 import re
@@ -364,6 +365,13 @@ def safe_title(page: Any) -> str:
 def safe_body_text(page: Any) -> str:
     try:
         return normalize_text(page.locator("body").inner_text(timeout=5_000))
+    except Exception:
+        return ""
+
+
+def safe_raw_body_text(page: Any) -> str:
+    try:
+        return str(page.locator("body").inner_text(timeout=5_000) or "")
     except Exception:
         return ""
 
@@ -1447,26 +1455,47 @@ class LinuxDoBrowser:
         if not stopped_early:
             logger.info("达到单帖浏览步数上限，结束当前帖子")
 
-    def _request_session_json(
+    def _request_browser_json(
         self,
         url: str,
         *,
         referer_url: str = "",
     ) -> Optional[Dict[str, Any]]:
-        headers = {
-            "Referer": referer_url or HOME_URL,
-            "X-Requested-With": "XMLHttpRequest",
-        }
-        response = self.session.get(
-            url,
-            headers=headers,
-            impersonate="chrome136",
-            **self.request_kwargs,
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"status={response.status_code}, url={url}")
+        snapshot: Dict[str, Any] = {}
 
-        payload = response.json()
+        def action(fetch_page: Any) -> None:
+            snapshot["url"] = getattr(fetch_page, "url", "") or ""
+            snapshot["title"] = safe_title(fetch_page)
+            snapshot["body_raw"] = safe_raw_body_text(fetch_page)
+            snapshot["body_text"] = normalize_text(snapshot["body_raw"])
+
+        fetch_kwargs = {
+            "page_action": action,
+            "wait_selector": "body",
+            "timeout": browser_timeout_ms(),
+            "google_search": False,
+            "load_dom": True,
+            "solve_cloudflare": True,
+        }
+        if referer_url:
+            fetch_kwargs["extra_headers"] = {"Referer": referer_url}
+
+        self.browser.fetch(url, **fetch_kwargs)
+        if is_cloudflare_snapshot(snapshot):
+            raise RuntimeError(f"主题 JSON 命中 Cloudflare challenge: url={url}")
+        if is_rate_limited_snapshot(snapshot):
+            raise RuntimeError(f"主题 JSON 命中站点限流: url={url}")
+
+        raw_body = str(snapshot.get("body_raw") or "").strip()
+        if not raw_body:
+            raise RuntimeError(f"主题 JSON 响应为空: url={url}")
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError as exc:
+            preview = normalize_text(raw_body)[:200] or "<empty>"
+            raise RuntimeError(
+                f"主题 JSON 解析失败: url={url}, preview={preview}"
+            ) from exc
         if not isinstance(payload, dict):
             raise RuntimeError(f"响应不是 JSON object: url={url}")
         return payload
@@ -1477,7 +1506,7 @@ class LinuxDoBrowser:
             logger.info("当前页面不是标准主题帖 URL，跳过点赞")
             return []
 
-        topic_payload = self._request_session_json(
+        topic_payload = self._request_browser_json(
             topic_json_url,
             referer_url=getattr(page, "url", "") or HOME_URL,
         )
@@ -1621,8 +1650,7 @@ class LinuxDoBrowser:
         else:
             logger.info("当前主题暂未发现可见点赞按钮，继续按主题 JSON 候选帖子尝试真实按钮点击")
         try:
-            # 继续复用主题 JSON 只挑未点赞候选帖子，避免把旧赞误点成取消赞。
-            self._sync_browser_cookies_to_session()
+            # 候选帖子读取也统一走 Scrapling 浏览器上下文，避免混入 curl session 指纹差异。
             likeable_post_ids = self._fetch_likeable_post_ids(page)
         except Exception as exc:
             logger.warning(f"读取主题点赞状态失败，跳过点赞: {str(exc)}")
