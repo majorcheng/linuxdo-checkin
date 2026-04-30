@@ -11,6 +11,7 @@ from main import (
     is_likeable_post_payload,
     is_pointer_intercept_error,
     parse_bool_env,
+    response_looks_like_cloudflare,
     resolve_browser_launch_useragent,
 )
 
@@ -99,6 +100,8 @@ class FakeLikePage:
         self.wait_timeout_calls = []
         self.page_evaluate_calls = []
         self.dialog_present = dialog_present
+        self.goto_calls = []
+        self.wait_for_load_state_calls = []
 
     def locator(self, selector: str) -> FakeLocator:
         self.locator_calls.append(selector)
@@ -119,6 +122,13 @@ class FakeLikePage:
 
     def wait_for_timeout(self, timeout: int) -> None:
         self.wait_timeout_calls.append(timeout)
+
+    def goto(self, url: str, wait_until=None) -> None:
+        self.goto_calls.append((url, wait_until))
+        self.url = url
+
+    def wait_for_load_state(self, state: str, timeout=None) -> None:
+        self.wait_for_load_state_calls.append((state, timeout))
 
     def evaluate(self, script: str):
         self.page_evaluate_calls.append(script)
@@ -259,6 +269,12 @@ def test_resolve_browser_launch_useragent_prefers_native_headful_ua():
     assert resolve_browser_launch_useragent("", headless=False) == ""
 
 
+def test_response_looks_like_cloudflare_matches_challenge_html():
+    assert response_looks_like_cloudflare("<title>Just a moment...</title>")
+    assert response_looks_like_cloudflare("Enable JavaScript and cookies to continue")
+    assert not response_looks_like_cloudflare('{"ok":true}')
+
+
 def test_create_browser_session_respects_browser_mode(monkeypatch):
     class DummyStealthSession:
         def __init__(self, **kwargs) -> None:
@@ -392,6 +408,66 @@ def test_click_like_retries_next_candidate_after_403(monkeypatch):
         main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
         main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
     ]
+
+
+def test_click_like_retries_same_candidate_after_cloudflare_recovery(monkeypatch):
+    target_button = FakeButton()
+    response_403 = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('222')}",
+        403,
+        "<html><title>Just a moment...</title></html>",
+    )
+    response_200 = FakeResponse(
+        f"https://linux.do{build_like_toggle_fragment('222')}",
+        200,
+        "{}",
+        {"current_user_used_main_reaction": True},
+    )
+    page = FakeLikePage(
+        {
+            main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
+            scoped_click_target_selector("222"): [target_button],
+        },
+        [response_403, response_200],
+        url="https://linux.do/t/topic/1934859",
+    )
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+    browser.request_kwargs = {}
+    browser.session = FakeSession(
+        get_routes={
+            "https://linux.do/t/topic/1934859.json": [
+                FakeResponse(
+                    "https://linux.do/t/topic/1934859.json",
+                    200,
+                    json_data={
+                        "post_stream": {
+                            "posts": [
+                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+                            ]
+                        }
+                    },
+                )
+            ],
+        },
+    )
+    browser._sync_browser_cookies_to_session = lambda: None
+    fetch_calls = []
+    browser._fetch_page_snapshot = (
+        lambda url, include_auth_signals=False, solve_cloudflare=None: fetch_calls.append(
+            (url, include_auth_signals, solve_cloudflare)
+        )
+        or {"url": url, "title": "", "body_text": ""}
+    )
+
+    monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    browser.click_like(page)
+
+    assert target_button.click_count == 2
+    assert fetch_calls == [("https://linux.do/t/topic/1934859", False, True)]
+    assert page.goto_calls == [("https://linux.do/t/topic/1934859", "domcontentloaded")]
+    assert page.wait_for_load_state_calls == [("networkidle", 5000)]
 
 
 def test_click_like_skips_candidate_missing_from_dom(monkeypatch):

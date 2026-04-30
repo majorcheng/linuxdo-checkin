@@ -8,6 +8,7 @@
 - 第三轮去掉 `DOM click`、补了遮挡重定位和阻塞弹窗清理后，Action 日志里不再出现“降级为 DOM click”，而是直接对真实按钮点击后的 `toggle.json` 收到 `403 / Just a moment...`。
 - 当前 `main.py` 仍通过 Scrapling `StealthySession(headless=True, real_chrome=False)` 启动浏览器；而我此前用本地真实 Chrome 做 live 对照时，真实点赞链路可成功。
 - 将 Action 切到 `headed + real Chrome` 后，日志已确认 `headless=0, real_chrome=1`，但点赞请求依然返回 challenge；同一轮日志同时显示 `proxy=on`，且代理是 `https://` 出口。
+- 将 Action 临时改成 runner 直连后，主页不再返回点赞 challenge，但开始连续出现 `GET https://linux.do/ -> 429`，最终无法拿到主题帖，说明直连无法替代当前代理出口。
 - 这说明失败的不只是外部 `curl_cffi` 重放，连页面内裸 `fetch` 与 `DOM click` 也不是站点认可的真实交互链；在可信 pointer click 已成立后，剩余差异进一步收敛到 CI 浏览器环境本身。
 
 ## Hypotheses
@@ -29,8 +30,13 @@
 
 ### H4: GitHub Actions 使用的代理出口触发了 Cloudflare 对点赞请求的更严格挑战（ROOT HYPOTHESIS）
 - Supports: 切到 `headed + real Chrome` 后仍是 challenge；最新日志明确记录 `proxy=on`；我本地成功样本是无此 Action 代理的真实 Chrome；同仓库日志里还出现过主题 JSON 超时，代理链路本身存在不稳定迹象。
-- Conflicts: 还没有在 GitHub Actions 上直接验证“去代理直连 runner 出口”能否让点赞成功。
+- Conflicts: 去代理直连虽然去掉了点赞 challenge，但主页立刻命中 `429`，导致浏览主线不可用。
 - Test: 暂时移除 workflow 中的 `LINUXDO_PROXY_URL` / `LINUXDO_PROXY_INSECURE`，保持其余条件不变，再跑一轮 `Daily Check-in`。
+
+### H5: 代理浏览环境是必须的，但点赞命中 challenge 后需要显式再做一次 Cloudflare 恢复（ROOT HYPOTHESIS）
+- Supports: 代理开启时主页与帖子浏览正常，只有点赞请求返回 challenge；当前代码在收到 403 challenge HTML 后会直接换下一个候选，从未尝试在同一浏览器上下文里显式恢复 challenge 状态。
+- Conflicts: 还没有在 GitHub Actions 上验证“收到 challenge 后先 solve 再重试同一候选”是否足以成功点赞。
+- Test: 保持代理与 headed real Chrome，新增 challenge HTML 识别、`solve_cloudflare=True` 恢复与同一候选一次受控重试，再跑一轮 `Daily Check-in`。
 
 ## Experiments
 
@@ -39,11 +45,12 @@
 - 已完成：将点赞执行切换为候选按钮真实点击，补齐候选楼层缺失、403 重试、指针遮挡重定位、禁用 `DOM click` 退路等单测。
 - 已完成：清理阻塞点赞的 Discourse 弹窗，确认 Action 现场不再依赖 `DOM click`，但真实点击后的响应仍是 `403 / Just a moment...`。
 - 已完成：将 GitHub Actions 浏览器运行模式切到 `headed + real Chrome + xvfb-run`，但 challenge 仍存在，H3 被否定。
-- 进行中：移除 workflow 里的代理出口，验证 runner 直连是否能打通点赞请求。
+- 已完成：移除 workflow 里的代理出口后，runner 直连首页持续 `429`、无法拿到主题帖，H4 被部分否定。
+- 进行中：保持代理浏览前提，在收到点赞 challenge 时显式恢复 Cloudflare 状态，并对同一候选只重试一次。
 
 ## Root Cause
 
-- 当前已确认的根因分两层：第一层是脚本构造请求链路会被 challenge，因此必须走候选楼层真实按钮点击；第二层已经从“headless Chromium 差异”进一步收敛到“GitHub Actions 当前代理出口仍会触发 Cloudflare challenge”，后者仍待 runner 直连回归最终确认。
+- 当前已确认的根因分两层：第一层是脚本构造请求链路会被 challenge，因此必须走候选楼层真实按钮点击；第二层已经从“headless Chromium 差异”进一步收敛到“代理浏览前提下，点赞命中 challenge 后缺少显式恢复动作”。runner 直连虽然绕开了点赞 challenge，但会在主页立即触发 `429`，因此不能替代代理。
 
 ## Fix
 
@@ -52,4 +59,5 @@
 - 已完成：点击时保留滚动到安全位置、等待页面稳定、拦截响应，并在被遮挡时重新定位后重试真实点击。
 - 已完成：彻底禁用 `DOM click` 兜底；若候选按钮持续被遮挡，则干净失败并切到下一个候选。
 - 已完成：为浏览器启动增加显式 `LINUXDO_BROWSER_HEADLESS` / `LINUXDO_BROWSER_REAL_CHROME` 开关，并已在 GitHub Actions 中验证 `xvfb-run + headed + real Chrome` 生效。
-- 进行中：将 GitHub Actions 的点赞链路临时改走 runner 直连，验证代理是否就是剩余的 challenge 根因。
+- 已完成：将 GitHub Actions 的点赞链路临时改走 runner 直连，确认主页会直接命中 `429`，因此该路不成立。
+- 进行中：保留代理浏览前提，新增“点赞 403 challenge → solve_cloudflare 恢复 → 同一候选单次重试”链路。

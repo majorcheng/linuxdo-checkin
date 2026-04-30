@@ -418,6 +418,19 @@ def is_cloudflare_snapshot(snapshot: Dict[str, Any]) -> bool:
     return any(keyword in body_text for keyword in CLOUDFLARE_KEYWORDS)
 
 
+def response_looks_like_cloudflare(text: str) -> bool:
+    """点赞接口若直接返回 challenge HTML，这里统一复用 Cloudflare 关键字判定。"""
+    normalized = normalize_text(text).lower()
+    if not normalized:
+        return False
+
+    title_matches = (keyword.lower() for keyword in CLOUDFLARE_TITLES)
+    if any(keyword in normalized for keyword in title_matches):
+        return True
+
+    return any(keyword.lower() in normalized for keyword in CLOUDFLARE_KEYWORDS)
+
+
 def is_rate_limited_snapshot(snapshot: Dict[str, Any]) -> bool:
     title = snapshot.get("title", "") or ""
     body_text = snapshot.get("body_text", "") or ""
@@ -669,6 +682,20 @@ def resolve_browser_launch_useragent(captured_useragent: str, headless: bool) ->
     if captured_useragent:
         return captured_useragent
     return DEFAULT_USER_AGENT if headless else ""
+
+
+def extract_like_response_result(response: Any) -> Dict[str, Any]:
+    """统一抽取点赞响应状态，避免首轮与 challenge 重试后重复拆解响应体。"""
+    payload = read_response_json_object(response)
+    preview_text = read_response_text(response)
+    return {
+        "status_code": get_response_status_code(response),
+        "payload": payload,
+        "preview_text": preview_text,
+        "preview": build_like_toggle_response_preview(
+            {"payload": payload, "preview": preview_text}
+        ),
+    }
 
 
 class ManagedStealthSession:
@@ -1524,6 +1551,22 @@ class LinuxDoBrowser:
             time.sleep(LIKE_BUTTON_SETTLE_TIMEOUT_MS / 1000)
         return bool(result.get("dismissed"))
 
+    def _recover_from_like_challenge(self, page: Any, topic_url: str) -> bool:
+        recovery_url = topic_url or HOME_URL
+        logger.info(f"点赞命中 Cloudflare challenge，尝试恢复页面挑战状态: url={recovery_url}")
+        try:
+            self._fetch_page_snapshot(recovery_url, solve_cloudflare=True)
+            page.goto(recovery_url, wait_until="domcontentloaded")
+            try:
+                page.wait_for_load_state("networkidle", timeout=5_000)
+            except Exception:
+                pass
+            wait_page_seconds(page, 1.2, 1.8, "Cloudflare 恢复后页面沉淀")
+            return True
+        except Exception as exc:
+            logger.warning(f"Cloudflare challenge 恢复失败: {str(exc)}")
+            return False
+
     def _click_candidate_like_button(
         self,
         page: Any,
@@ -1605,15 +1648,15 @@ class LinuxDoBrowser:
                     f"尝试点赞失败(post_id={selected_post_id or '<unknown>'}): {str(exc)}"
                 )
                 continue
-            status_code = get_response_status_code(response)
-            payload = read_response_json_object(response)
+            result = extract_like_response_result(response)
+            status_code = result["status_code"]
+            payload = result["payload"]
             if status_code == 200 and is_like_toggle_response_success(payload):
                 logger.info(f"点赞成功 post_id={selected_post_id or '<unknown>'}")
                 time.sleep(random.uniform(1, 2))
                 return
-            preview = build_like_toggle_response_preview(
-                {"payload": payload, "preview": read_response_text(response)}
-            )
+            response_text = result["preview_text"]
+            preview = result["preview"]
             logger.warning(
                 "点赞请求已发出，但未确认成功"
                 f"({status_code})，"
@@ -1621,6 +1664,50 @@ class LinuxDoBrowser:
                 f"response_url={getattr(response, 'url', '')}, "
                 f"response_preview={preview or '<empty>'}"
             )
+            if status_code == 403 and response_looks_like_cloudflare(response_text):
+                topic_url = getattr(page, "url", "") or ""
+                if self._recover_from_like_challenge(page, topic_url):
+                    self._dismiss_blocking_dialog(page)
+                    retry_button, retry_selector = self._find_candidate_like_button(
+                        page,
+                        selected_post_id,
+                    )
+                    if retry_button is None:
+                        logger.info(
+                            "Cloudflare 恢复后仍未找到候选楼层按钮，继续尝试下一个候选: "
+                            f"post_id={selected_post_id}"
+                        )
+                        continue
+                    try:
+                        retry_response = self._click_candidate_like_button(
+                            page,
+                            retry_button,
+                            retry_selector,
+                            selected_post_id,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Cloudflare 恢复后重试点赞失败: "
+                            f"post_id={selected_post_id}, error={str(exc)}"
+                        )
+                        continue
+                    retry_result = extract_like_response_result(retry_response)
+                    if (
+                        retry_result["status_code"] == 200
+                        and is_like_toggle_response_success(retry_result["payload"])
+                    ):
+                        logger.info(
+                            f"点赞成功 post_id={selected_post_id or '<unknown>'} (challenge 恢复后)"
+                        )
+                        time.sleep(random.uniform(1, 2))
+                        return
+                    logger.warning(
+                        "Cloudflare 恢复后重试仍未确认成功"
+                        f"({retry_result['status_code']})，"
+                        f"post_id={selected_post_id or '<unknown>'}, "
+                        f"response_url={getattr(retry_response, 'url', '')}, "
+                        f"response_preview={retry_result['preview'] or '<empty>'}"
+                    )
             if status_code == 403:
                 logger.info("当前候选帖子点赞请求被拒绝，继续尝试下一个候选 post_id")
         logger.info("当前主题所有未点赞帖子都未成功点赞")
