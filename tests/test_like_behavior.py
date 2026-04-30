@@ -10,6 +10,8 @@ from main import (
     is_like_toggle_response_success,
     is_likeable_post_payload,
     is_pointer_intercept_error,
+    parse_bool_env,
+    resolve_browser_launch_useragent,
 )
 
 
@@ -238,6 +240,46 @@ def test_build_like_toggle_response_preview_prefers_api_errors():
 def test_is_pointer_intercept_error_matches_current_message():
     assert is_pointer_intercept_error(RuntimeError("foo intercepts pointer events bar"))
     assert not is_pointer_intercept_error(RuntimeError("other error"))
+
+
+def test_parse_bool_env_reads_common_values(monkeypatch):
+    monkeypatch.setenv("TEST_BOOL_ENV", "yes")
+    assert parse_bool_env("TEST_BOOL_ENV", False) is True
+
+    monkeypatch.setenv("TEST_BOOL_ENV", "off")
+    assert parse_bool_env("TEST_BOOL_ENV", True) is False
+
+    monkeypatch.setenv("TEST_BOOL_ENV", "unexpected")
+    assert parse_bool_env("TEST_BOOL_ENV", True) is True
+
+
+def test_resolve_browser_launch_useragent_prefers_native_headful_ua():
+    assert resolve_browser_launch_useragent("captured-ua", headless=False) == "captured-ua"
+    assert resolve_browser_launch_useragent("", headless=True) == main.DEFAULT_USER_AGENT
+    assert resolve_browser_launch_useragent("", headless=False) == ""
+
+
+def test_create_browser_session_respects_browser_mode(monkeypatch):
+    class DummyStealthSession:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(main, "StealthySession", DummyStealthSession)
+    monkeypatch.setattr(main, "SCRAPLING_IMPORT_ERROR", None)
+
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+    browser.proxy_runtime = None
+    browser.local_proxy_url = None
+    browser.browser_headless = False
+    browser.browser_real_chrome = True
+    browser.browser_launch_useragent = ""
+    browser.browser_extra_headers = {"Accept-Language": "zh-CN,zh;q=0.9"}
+
+    managed = browser._create_browser_session()
+
+    assert managed.session.kwargs["headless"] is False
+    assert managed.session.kwargs["real_chrome"] is True
+    assert managed.session.kwargs["useragent"] is None
 
 
 def test_click_like_skips_already_liked_posts_and_clicks_next_candidate(monkeypatch):

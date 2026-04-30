@@ -51,6 +51,18 @@ class CapturedRequestProfile:
         return self.headers.get("accept-language", "").strip()
 
 
+def parse_bool_env(name: str, default: bool) -> bool:
+    """统一解析布尔环境变量，避免 CI 与本地浏览器模式判断出现歧义。"""
+    normalized = os.environ.get(name, "").strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"true", "1", "on", "yes"}:
+        return True
+    if normalized in {"false", "0", "off", "no"}:
+        return False
+    return default
+
+
 def looks_like_curl_command(raw_text: str) -> bool:
     return raw_text.lstrip().startswith("curl ")
 
@@ -168,6 +180,8 @@ CONNECT_INFO_ENABLED = os.environ.get("LINUXDO_CONNECT_INFO_ENABLED", "false").s
     "on",
     "yes",
 ]
+BROWSER_HEADLESS = parse_bool_env("LINUXDO_BROWSER_HEADLESS", True)
+BROWSER_REAL_CHROME = parse_bool_env("LINUXDO_BROWSER_REAL_CHROME", False)
 
 HOME_URL = "https://linux.do/"
 CONNECT_URL = "https://connect.linux.do/"
@@ -650,6 +664,13 @@ def build_like_toggle_response_preview(result: Dict[str, Any]) -> str:
     return preview[:160] if preview else "<empty>"
 
 
+def resolve_browser_launch_useragent(captured_useragent: str, headless: bool) -> str:
+    """headed + real Chrome 时尽量复用浏览器原生 UA，降低硬编码 UA 失真风险。"""
+    if captured_useragent:
+        return captured_useragent
+    return DEFAULT_USER_AGENT if headless else ""
+
+
 class ManagedStealthSession:
     """统一管理 Scrapling 会话和可选本地代理桥生命周期。"""
 
@@ -678,7 +699,13 @@ class LinuxDoBrowser:
         self.notifier = NotificationManager()
         self.last_failure_reason = ""
         self.captured_request_profile = CAPTURED_REQUEST_PROFILE
+        self.browser_headless = BROWSER_HEADLESS
+        self.browser_real_chrome = BROWSER_REAL_CHROME
         self.browser_useragent = self.captured_request_profile.useragent or DEFAULT_USER_AGENT
+        self.browser_launch_useragent = resolve_browser_launch_useragent(
+            self.captured_request_profile.useragent,
+            self.browser_headless,
+        )
         self.browser_extra_headers: Dict[str, str] = {}
         if self.captured_request_profile.accept_language:
             self.browser_extra_headers["Accept-Language"] = self.captured_request_profile.accept_language
@@ -736,18 +763,25 @@ class LinuxDoBrowser:
                 "然后执行 `scrapling install`。"
             ) from SCRAPLING_IMPORT_ERROR
 
+        logger.info(
+            "创建浏览器会话: "
+            f"headless={int(self.browser_headless)}, "
+            f"real_chrome={int(self.browser_real_chrome)}, "
+            f"proxy={'on' if self.local_proxy_url else 'off'}"
+        )
         browser = StealthySession(
-            headless=True,
+            headless=self.browser_headless,
             solve_cloudflare=True,
             network_idle=False,
             timeout=browser_timeout_ms(),
             google_search=False,
-            useragent=self.browser_useragent,
+            useragent=self.browser_launch_useragent or None,
             extra_headers=self.browser_extra_headers or None,
             locale="zh-CN",
             timezone_id="Asia/Shanghai",
             proxy=self.local_proxy_url,
             load_dom=True,
+            real_chrome=self.browser_real_chrome,
         )
         return ManagedStealthSession(browser, self.proxy_runtime)
 

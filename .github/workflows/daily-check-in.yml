@@ -42,8 +42,10 @@ jobs:
           BROWSE_ENABLED: ${{ secrets.BROWSE_ENABLED }}
           LINUXDO_PROXY_URL: ${{ secrets.LINUXDO_PROXY_URL }}
           LINUXDO_PROXY_INSECURE: ${{ secrets.LINUXDO_PROXY_INSECURE }}
+          LINUXDO_BROWSER_HEADLESS: "false"
+          LINUXDO_BROWSER_REAL_CHROME: "true"
         run: |
-          python main.py
+          xvfb-run -a --server-args="-screen 0 1920x1080x24" python main.py
 
       - name: Delete workflow runs
         uses: Mattraks/delete-workflow-runs@v2
