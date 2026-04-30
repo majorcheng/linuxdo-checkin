@@ -242,6 +242,46 @@ LIKE_TOGGLE_URL_KEYWORDS = (
     "/discourse-reactions/posts/",
     "/custom-reactions/heart/toggle.json",
 )
+PAGE_CSRF_TOKEN_SCRIPT = (
+    "() => document.querySelector(\"meta[name='csrf-token']\")?.getAttribute('content') || ''"
+)
+PAGE_TOGGLE_LIKE_SCRIPT = """
+async ({ endpoint, csrfToken }) => {
+  try {
+    const response = await fetch(endpoint, {
+      method: "PUT",
+      credentials: "include",
+      headers: {
+        "Accept": "*/*",
+        "Discourse-Logged-In": "true",
+        "Discourse-Present": "true",
+        "X-CSRF-Token": csrfToken,
+        "X-Requested-With": "XMLHttpRequest",
+      },
+    });
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch {}
+    return {
+      ok: response.ok,
+      payload,
+      preview: text.slice(0, 160),
+      responseUrl: response.url || "",
+      status: response.status,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      payload: null,
+      preview: String(error || ""),
+      responseUrl: endpoint,
+      status: 0,
+    };
+  }
+}
+"""
 
 
 def retry_decorator(retries: int = 3, min_delay: int = 5, max_delay: int = 10):
@@ -458,10 +498,6 @@ def is_like_toggle_url(url: str) -> bool:
     return all(keyword in url for keyword in LIKE_TOGGLE_URL_KEYWORDS)
 
 
-def is_pointer_intercept_error(exc: Exception) -> bool:
-    return "intercepts pointer events" in str(exc)
-
-
 def build_like_toggle_fragment(post_id: str) -> str:
     post_id = str(post_id or "").strip()
     if not post_id:
@@ -482,25 +518,6 @@ def build_topic_json_url(url: str) -> str:
         return ""
 
     return parsed._replace(path=f"{match.group(1)}.json", query="", fragment="").geturl()
-
-
-def extract_like_button_post_id(button: Any) -> str:
-    try:
-        return str(
-            button.evaluate(
-                "(el) => el.closest('article')?.getAttribute('data-post-id') || ''"
-            )
-            or ""
-        ).strip()
-    except Exception:
-        return ""
-
-
-def read_response_text(response: Any) -> str:
-    try:
-        return str(response.text() or "").strip()
-    except Exception:
-        return ""
 
 
 def extract_like_action_summary(post_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -554,6 +571,31 @@ def collect_likeable_post_ids(topic_payload: Dict[str, Any]) -> List[str]:
             continue
         post_ids.append(post_id)
     return post_ids
+
+
+def is_like_toggle_response_success(payload: Dict[str, Any]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    if payload.get("current_user_used_main_reaction") is True:
+        return True
+
+    current_reaction = payload.get("current_user_reaction") or {}
+    if not isinstance(current_reaction, dict):
+        return False
+
+    return str(current_reaction.get("id") or "").strip() == "heart"
+
+
+def build_like_toggle_response_preview(result: Dict[str, Any]) -> str:
+    payload = result.get("payload") or {}
+    if isinstance(payload, dict):
+        errors = payload.get("errors") or []
+        if isinstance(errors, list) and errors:
+            return str(errors[0]).strip()[:160]
+
+    preview = str(result.get("preview") or "").strip()
+    return preview[:160] if preview else "<empty>"
 
 
 class ManagedStealthSession:
@@ -1328,88 +1370,82 @@ class LinuxDoBrowser:
         )
         return collect_likeable_post_ids(topic_payload)
 
-    def _fetch_csrf_token(self, referer_url: str) -> str:
-        payload = self._request_session_json(
-            f"{HOME_URL.rstrip('/')}/session/csrf",
-            referer_url=referer_url,
-        )
-        csrf_token = str(payload.get("csrf") or "").strip()
-        if not csrf_token:
-            raise RuntimeError("未拿到 csrf token")
-        return csrf_token
-
-    def _confirm_post_liked(self, post_id: str, referer_url: str) -> bool:
-        payload = self._request_session_json(
-            f"{HOME_URL.rstrip('/')}/posts/{post_id}",
-            referer_url=referer_url,
-        )
-        return bool(extract_like_action_summary(payload).get("acted"))
-
-    def click_like(self, page: Any) -> None:
+    def _find_like_button_selector(self, page: Any) -> str:
         for selector in LIKE_BUTTON_SELECTORS:
             try:
-                locator = page.locator(selector)
-                if locator.count() <= 0:
-                    continue
-                logger.info(f"确认当前主题存在点赞按钮: selector={selector}")
-                break
+                if page.locator(selector).count() > 0:
+                    return selector
             except Exception as exc:
-                logger.warning(f"尝试点赞失败({selector}): {str(exc)}")
+                logger.warning(f"尝试定位点赞按钮失败({selector}): {str(exc)}")
+        return ""
+
+    def _fetch_page_csrf_token(self, page: Any) -> str:
+        csrf_token = str(page.evaluate(PAGE_CSRF_TOKEN_SCRIPT) or "").strip()
+        if not csrf_token:
+            raise RuntimeError("当前页面未拿到 csrf token")
+        return csrf_token
+
+    def _toggle_like_in_page(
+        self,
+        page: Any,
+        post_id: str,
+        csrf_token: str,
+    ) -> Dict[str, Any]:
+        endpoint = build_like_toggle_fragment(post_id)
+        if not endpoint:
+            raise RuntimeError("候选 post_id 为空，无法发起点赞请求")
+        result = page.evaluate(
+            PAGE_TOGGLE_LIKE_SCRIPT,
+            {"csrfToken": csrf_token, "endpoint": endpoint},
+        )
+        if not isinstance(result, dict):
+            raise RuntimeError(f"页面内点赞返回异常结果: {result!r}")
+        return result
+
+    def click_like(self, page: Any) -> None:
+        selector = self._find_like_button_selector(page)
+        if selector:
+            logger.info(f"确认当前主题存在点赞按钮: selector={selector}")
         else:
-            logger.info("帖子可能已经点过赞了，或当前页面没有可点击的点赞按钮")
-            return
+            logger.info("当前主题暂未发现可见点赞按钮，继续按主题 JSON 候选帖子尝试页面内点赞")
 
         try:
-            # 浏览器页面里哪些按钮“可见”并不代表它们一定“还没点过赞”。
-            # 这里先回读主题 JSON，只挑 acted!=true 且 can_act=true 的帖子，
-            # 避免重复执行时把旧赞误点成取消赞。
+            # 继续复用主题 JSON 只挑未点赞候选帖子，避免把旧赞误点成取消赞。
             self._sync_browser_cookies_to_session()
-            referer_url = getattr(page, "url", "") or HOME_URL
             likeable_post_ids = self._fetch_likeable_post_ids(page)
             if not likeable_post_ids:
                 logger.info("当前主题没有可点赞的未点赞帖子")
                 return
-            csrf_token = self._fetch_csrf_token(referer_url)
+            csrf_token = self._fetch_page_csrf_token(page)
         except Exception as exc:
             logger.warning(f"读取主题点赞状态失败，跳过点赞: {str(exc)}")
             return
 
         for selected_post_id in likeable_post_ids:
             try:
-                response = self.session.put(
-                    f"{HOME_URL.rstrip('/')}{build_like_toggle_fragment(selected_post_id)}",
-                    headers={
-                        "Accept": "*/*",
-                        "Origin": HOME_URL.rstrip("/"),
-                        "Referer": referer_url,
-                        "Discourse-Logged-In": "true",
-                        "Discourse-Present": "true",
-                        "X-CSRF-Token": csrf_token,
-                        "X-Requested-With": "XMLHttpRequest",
-                    },
-                    impersonate="chrome136",
-                    **self.request_kwargs,
-                )
-
-                if response.status_code == 200 and self._confirm_post_liked(
+                result = self._toggle_like_in_page(
+                    page,
                     selected_post_id,
-                    referer_url,
+                    csrf_token,
+                )
+                status_code = int(result.get("status") or 0)
+                if status_code == 200 and is_like_toggle_response_success(
+                    result.get("payload") or {}
                 ):
                     logger.info(f"点赞成功 post_id={selected_post_id or '<unknown>'}")
                     time.sleep(random.uniform(1, 2))
                     return
 
-                response_text = read_response_text(response)
-                preview = response_text[:160] if response_text else ""
+                preview = build_like_toggle_response_preview(result)
                 logger.warning(
-                    "点赞请求已发出，但接口返回异常状态"
-                    f"({response.status_code})，"
+                    "点赞请求已发出，但未确认成功"
+                    f"({status_code})，"
                     f"post_id={selected_post_id or '<unknown>'}, "
-                    f"response_url={getattr(response, 'url', '')}, "
+                    f"response_url={result.get('responseUrl', '')}, "
                     f"response_preview={preview or '<empty>'}"
                 )
-                if response.status_code == 403:
-                    logger.info("当前候选帖子不可点赞，继续尝试下一个可见点赞按钮")
+                if status_code == 403:
+                    logger.info("当前候选帖子点赞请求被拒绝，继续尝试下一个候选 post_id")
                     continue
             except Exception as exc:
                 logger.warning(

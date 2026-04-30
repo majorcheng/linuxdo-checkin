@@ -2,44 +2,18 @@ import main
 import pytest
 from main import (
     LinuxDoBrowser,
-    build_topic_json_url,
     build_like_toggle_fragment,
+    build_like_toggle_response_preview,
+    build_topic_json_url,
     collect_likeable_post_ids,
     extract_like_action_summary,
-    extract_like_button_post_id,
+    is_like_toggle_response_success,
     is_likeable_post_payload,
-    is_pointer_intercept_error,
 )
 
 
 class FakeButton:
-    def __init__(
-        self,
-        visible: bool = True,
-        click_error: Exception | None = None,
-        post_id: str = "1001",
-    ) -> None:
-        self.visible = visible
-        self.click_count = 0
-        self.last_timeout = None
-        self.click_error = click_error
-        self.evaluate_calls = []
-        self.post_id = post_id
-
-    def is_visible(self) -> bool:
-        return self.visible
-
-    def click(self, timeout=None) -> None:
-        if self.click_error is not None:
-            raise self.click_error
-        self.click_count += 1
-        self.last_timeout = timeout
-
-    def evaluate(self, script: str):
-        self.evaluate_calls.append(script)
-        if "closest('article')?.getAttribute('data-post-id')" in script:
-            return self.post_id
-        return None
+    pass
 
 
 class FakeLocator:
@@ -70,64 +44,47 @@ class FakeResponse:
         return self._json_data
 
 
-class FakeResponseInfo:
-    def __init__(self, response_factory) -> None:
-        self._response_factory = response_factory
-        self.value = None
-
-    def __enter__(self):
-        self.value = self._response_factory()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-
 class FakeLikePage:
-    def __init__(self, selector_map, responses) -> None:
+    def __init__(
+        self,
+        selector_map,
+        toggle_results=None,
+        csrf_token: str = "csrf-token",
+        url: str = "https://linux.do/t/topic/1934859",
+    ) -> None:
         self.selector_map = selector_map
-        self.responses = list(responses)
+        self.toggle_results = toggle_results or {}
+        self.csrf_token = csrf_token
+        self.url = url
         self.locator_calls = []
-        self.expect_response_calls = []
-        self.wait_timeout_calls = []
+        self.evaluate_calls = []
+        self.toggle_endpoints = []
 
     def locator(self, selector: str) -> FakeLocator:
         self.locator_calls.append(selector)
         return FakeLocator(self.selector_map.get(selector, []))
 
-    def expect_response(self, predicate, timeout=None) -> FakeResponseInfo:
-        self.expect_response_calls.append(timeout)
-        def factory():
-            assert self.responses, "no fake responses left"
-            while self.responses:
-                response = self.responses.pop(0)
-                if predicate(response) is True:
-                    return response
-            raise AssertionError("no matching fake response found")
-
-        return FakeResponseInfo(factory)
-
-    def wait_for_timeout(self, timeout: int) -> None:
-        self.wait_timeout_calls.append(timeout)
+    def evaluate(self, script: str, arg=None):
+        self.evaluate_calls.append((script, arg))
+        if "meta[name='csrf-token']" in script:
+            return self.csrf_token
+        if "fetch(endpoint" in script:
+            endpoint = arg["endpoint"]
+            self.toggle_endpoints.append(endpoint)
+            assert endpoint in self.toggle_results, f"unexpected endpoint {endpoint}"
+            return self.toggle_results[endpoint]
+        raise AssertionError(f"unexpected evaluate script: {script}")
 
 
 class FakeSession:
-    def __init__(self, get_routes=None, put_routes=None) -> None:
+    def __init__(self, get_routes=None) -> None:
         self.get_routes = {key: list(value) for key, value in (get_routes or {}).items()}
-        self.put_routes = {key: list(value) for key, value in (put_routes or {}).items()}
         self.get_calls = []
-        self.put_calls = []
 
     def get(self, url: str, **kwargs):
         self.get_calls.append((url, kwargs))
         responses = self.get_routes.get(url, [])
         assert responses, f"unexpected GET {url}"
-        return responses.pop(0)
-
-    def put(self, url: str, **kwargs):
-        self.put_calls.append((url, kwargs))
-        responses = self.put_routes.get(url, [])
-        assert responses, f"unexpected PUT {url}"
         return responses.pop(0)
 
 
@@ -175,10 +132,6 @@ def test_build_topic_json_url_keeps_canonical_topic_path():
     assert build_topic_json_url("https://linux.do/latest") == ""
 
 
-def test_extract_like_button_post_id_reads_closest_article_id():
-    assert extract_like_button_post_id(FakeButton(post_id="16477673")) == "16477673"
-
-
 def test_build_like_toggle_fragment_uses_exact_post_id():
     assert (
         build_like_toggle_fragment("16477673")
@@ -199,11 +152,6 @@ def test_is_likeable_post_payload_skips_already_acted_and_own_post():
     assert is_likeable_post_payload({"actions_summary": [{"id": 2, "can_act": True}]})
 
 
-def test_is_pointer_intercept_error_matches_current_playwright_message():
-    assert is_pointer_intercept_error(RuntimeError("foo intercepts pointer events bar"))
-    assert not is_pointer_intercept_error(RuntimeError("other error"))
-
-
 def test_collect_likeable_post_ids_only_keeps_unliked_posts():
     topic_payload = {
         "post_stream": {
@@ -217,9 +165,37 @@ def test_collect_likeable_post_ids_only_keeps_unliked_posts():
     assert collect_likeable_post_ids(topic_payload) == ["333"]
 
 
+def test_is_like_toggle_response_success_reads_main_reaction_flags():
+    assert is_like_toggle_response_success({"current_user_reaction": {"id": "heart"}})
+    assert is_like_toggle_response_success({"current_user_used_main_reaction": True})
+    assert not is_like_toggle_response_success({})
+
+
+def test_build_like_toggle_response_preview_prefers_api_errors():
+    assert (
+        build_like_toggle_response_preview({"payload": {"errors": ["forbidden"]}, "preview": ""})
+        == "forbidden"
+    )
+    assert build_like_toggle_response_preview({"payload": {}, "preview": "abc"}) == "abc"
+
+
 def test_click_like_skips_already_liked_posts_and_likes_next_candidate(monkeypatch):
-    page = FakeLikePage({main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()]}, [])
-    page.url = "https://linux.do/t/topic/1934859"
+    endpoint = build_like_toggle_fragment("222")
+    page = FakeLikePage(
+        {main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()]},
+        toggle_results={
+            endpoint: {
+                "ok": True,
+                "payload": {
+                    "current_user_reaction": {"id": "heart"},
+                    "current_user_used_main_reaction": True,
+                },
+                "preview": "",
+                "responseUrl": f"https://linux.do{endpoint}",
+                "status": 200,
+            }
+        },
+    )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
     browser.session = FakeSession(
@@ -238,29 +214,6 @@ def test_click_like_skips_already_liked_posts_and_likes_next_candidate(monkeypat
                     },
                 )
             ],
-            "https://linux.do/session/csrf": [
-                FakeResponse(
-                    "https://linux.do/session/csrf",
-                    200,
-                    json_data={"csrf": "csrf-token"},
-                )
-            ],
-            "https://linux.do/posts/222": [
-                FakeResponse(
-                    "https://linux.do/posts/222",
-                    200,
-                    json_data={"actions_summary": [{"id": 2, "acted": True}]},
-                )
-            ],
-        },
-        put_routes={
-            "https://linux.do/discourse-reactions/posts/222/custom-reactions/heart/toggle.json": [
-                FakeResponse(
-                    "https://linux.do/discourse-reactions/posts/222/custom-reactions/heart/toggle.json",
-                    200,
-                    "{}",
-                )
-            ]
         },
     )
     browser._sync_browser_cookies_to_session = lambda: None
@@ -271,19 +224,37 @@ def test_click_like_skips_already_liked_posts_and_likes_next_candidate(monkeypat
     browser.click_like(page)
 
     assert [url for url, _kwargs in browser.session.get_calls] == [
-        "https://linux.do/t/topic/1934859.json",
-        "https://linux.do/session/csrf",
-        "https://linux.do/posts/222",
+        "https://linux.do/t/topic/1934859.json"
     ]
-    assert [url for url, _kwargs in browser.session.put_calls] == [
-        "https://linux.do/discourse-reactions/posts/222/custom-reactions/heart/toggle.json"
-    ]
+    assert page.toggle_endpoints == [endpoint]
     assert page.locator_calls[0] == main.LIKE_BUTTON_SELECTORS[0]
 
 
 def test_click_like_retries_next_candidate_after_403(monkeypatch):
-    page = FakeLikePage({main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()]}, [])
-    page.url = "https://linux.do/t/topic/1934859"
+    endpoint_111 = build_like_toggle_fragment("111")
+    endpoint_222 = build_like_toggle_fragment("222")
+    page = FakeLikePage(
+        {main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()]},
+        toggle_results={
+            endpoint_111: {
+                "ok": False,
+                "payload": {"errors": ["forbidden"]},
+                "preview": "",
+                "responseUrl": f"https://linux.do{endpoint_111}",
+                "status": 403,
+            },
+            endpoint_222: {
+                "ok": True,
+                "payload": {
+                    "current_user_reaction": {"id": "heart"},
+                    "current_user_used_main_reaction": True,
+                },
+                "preview": "",
+                "responseUrl": f"https://linux.do{endpoint_222}",
+                "status": 200,
+            },
+        },
+    )
     browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
     browser.request_kwargs = {}
     browser.session = FakeSession(
@@ -302,34 +273,47 @@ def test_click_like_retries_next_candidate_after_403(monkeypatch):
                     },
                 )
             ],
-            "https://linux.do/session/csrf": [
-                FakeResponse(
-                    "https://linux.do/session/csrf",
-                    200,
-                    json_data={"csrf": "csrf-token"},
-                )
-            ],
-            "https://linux.do/posts/222": [
-                FakeResponse(
-                    "https://linux.do/posts/222",
-                    200,
-                    json_data={"actions_summary": [{"id": 2, "acted": True}]},
-                )
-            ],
         },
-        put_routes={
-            "https://linux.do/discourse-reactions/posts/111/custom-reactions/heart/toggle.json": [
+    )
+    browser._sync_browser_cookies_to_session = lambda: None
+
+    monkeypatch.setattr(main.random, "uniform", lambda _a, _b: 0.0)
+    monkeypatch.setattr(main.time, "sleep", lambda _seconds: None)
+
+    browser.click_like(page)
+
+    assert page.toggle_endpoints == [endpoint_111, endpoint_222]
+
+
+def test_click_like_keeps_trying_when_selector_temporarily_missing(monkeypatch):
+    endpoint = build_like_toggle_fragment("222")
+    page = FakeLikePage(
+        {},
+        toggle_results={
+            endpoint: {
+                "ok": True,
+                "payload": {"current_user_reaction": {"id": "heart"}},
+                "preview": "",
+                "responseUrl": f"https://linux.do{endpoint}",
+                "status": 200,
+            }
+        },
+    )
+    browser = LinuxDoBrowser.__new__(LinuxDoBrowser)
+    browser.request_kwargs = {}
+    browser.session = FakeSession(
+        get_routes={
+            "https://linux.do/t/topic/1934859.json": [
                 FakeResponse(
-                    "https://linux.do/discourse-reactions/posts/111/custom-reactions/heart/toggle.json",
-                    403,
-                    '{"errors":["forbidden"]}',
-                )
-            ],
-            "https://linux.do/discourse-reactions/posts/222/custom-reactions/heart/toggle.json": [
-                FakeResponse(
-                    "https://linux.do/discourse-reactions/posts/222/custom-reactions/heart/toggle.json",
+                    "https://linux.do/t/topic/1934859.json",
                     200,
-                    "{}",
+                    json_data={
+                        "post_stream": {
+                            "posts": [
+                                {"id": 222, "actions_summary": [{"id": 2, "can_act": True}]},
+                            ]
+                        }
+                    },
                 )
             ],
         },
@@ -341,10 +325,7 @@ def test_click_like_retries_next_candidate_after_403(monkeypatch):
 
     browser.click_like(page)
 
-    assert [url for url, _kwargs in browser.session.put_calls] == [
-        "https://linux.do/discourse-reactions/posts/111/custom-reactions/heart/toggle.json",
-        "https://linux.do/discourse-reactions/posts/222/custom-reactions/heart/toggle.json",
-    ]
+    assert page.toggle_endpoints == [endpoint]
 
 
 @pytest.mark.parametrize(
