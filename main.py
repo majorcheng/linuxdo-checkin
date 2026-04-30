@@ -245,11 +245,48 @@ LIKE_TOGGLE_URL_KEYWORDS = (
 LIKE_BUTTON_CLICK_TIMEOUT_MS = 3_000
 LIKE_BUTTON_RESPONSE_TIMEOUT_MS = 8_000
 LIKE_BUTTON_SETTLE_TIMEOUT_MS = 150
-LIKE_BUTTON_REPOSITION_STEPS = (
-    "(el) => el.scrollIntoView({block: 'center', inline: 'center'})",
-    "(el) => el.scrollIntoView({block: 'end', inline: 'center'})",
-    "(el) => el.scrollIntoView({block: 'start', inline: 'center'})",
+LIKE_CLICK_TARGET_SELECTORS = (
+    ".discourse-reactions-reaction-button[title='点赞此帖子']",
+    ".discourse-reactions-reaction-button[title='Like this post']",
 )
+LIKE_BUTTON_REPOSITION_STEPS = (
+    """(el) => {
+  const rect = el.getBoundingClientRect();
+  const absoluteTop = rect.top + window.scrollY;
+  const offsetTop = Math.max(220, Math.floor(window.innerHeight * 0.35));
+  window.scrollTo(0, Math.max(absoluteTop - offsetTop, 0));
+}""",
+    """(el) => {
+  const rect = el.getBoundingClientRect();
+  const absoluteTop = rect.top + window.scrollY;
+  const offsetTop = Math.max(280, Math.floor(window.innerHeight * 0.45));
+  window.scrollTo(0, Math.max(absoluteTop - offsetTop, 0));
+}""",
+    """(el) => {
+  const rect = el.getBoundingClientRect();
+  const absoluteTop = rect.top + window.scrollY;
+  const offsetTop = Math.max(340, Math.floor(window.innerHeight * 0.55));
+  window.scrollTo(0, Math.max(absoluteTop - offsetTop, 0));
+}""",
+)
+LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT = """() => {
+  const header = document.querySelector('.d-header-wrap');
+  if (!header) return;
+  if (!header.hasAttribute('data-codex-prev-pointer-events')) {
+    header.setAttribute(
+      'data-codex-prev-pointer-events',
+      header.style.pointerEvents || ''
+    );
+  }
+  header.style.pointerEvents = 'none';
+}"""
+LIKE_RESTORE_HEADER_POINTER_EVENTS_SCRIPT = """() => {
+  const header = document.querySelector('.d-header-wrap');
+  if (!header) return;
+  const previous = header.getAttribute('data-codex-prev-pointer-events');
+  header.style.pointerEvents = previous || '';
+  header.removeAttribute('data-codex-prev-pointer-events');
+}"""
 
 def retry_decorator(retries: int = 3, min_delay: int = 5, max_delay: int = 10):
     def decorator(func):
@@ -1379,7 +1416,8 @@ class LinuxDoBrowser:
         return ""
 
     def _find_candidate_like_button(self, page: Any, post_id: str) -> Tuple[Any, str]:
-        for selector in LIKE_BUTTON_SELECTORS:
+        selectors = LIKE_CLICK_TARGET_SELECTORS + LIKE_BUTTON_SELECTORS
+        for selector in selectors:
             scoped_selector = f"article[data-post-id='{post_id}'] {selector}"
             try:
                 locator = page.locator(scoped_selector)
@@ -1407,6 +1445,15 @@ class LinuxDoBrowser:
         except Exception:
             time.sleep(LIKE_BUTTON_SETTLE_TIMEOUT_MS / 1000)
 
+    def _disable_header_pointer_events(self, page: Any) -> None:
+        page.evaluate(LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT)
+
+    def _restore_header_pointer_events(self, page: Any) -> None:
+        try:
+            page.evaluate(LIKE_RESTORE_HEADER_POINTER_EVENTS_SCRIPT)
+        except Exception:
+            pass
+
     def _click_candidate_like_button(
         self,
         page: Any,
@@ -1428,6 +1475,7 @@ class LinuxDoBrowser:
                 ) from exc
 
             try:
+                self._disable_header_pointer_events(page)
                 with page.expect_response(
                     lambda response: endpoint_fragment
                     in (getattr(response, "url", "") or ""),
@@ -1443,6 +1491,8 @@ class LinuxDoBrowser:
                     f"selector={selector}, post_id={post_id}, attempt={attempt_index}/{len(LIKE_BUTTON_REPOSITION_STEPS)}"
                 )
                 continue
+            finally:
+                self._restore_header_pointer_events(page)
 
             return response_info.value
 

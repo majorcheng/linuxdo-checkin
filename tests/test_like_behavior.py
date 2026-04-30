@@ -89,6 +89,7 @@ class FakeLikePage:
         self.locator_calls = []
         self.expect_response_calls = []
         self.wait_timeout_calls = []
+        self.page_evaluate_calls = []
 
     def locator(self, selector: str) -> FakeLocator:
         self.locator_calls.append(selector)
@@ -109,6 +110,10 @@ class FakeLikePage:
 
     def wait_for_timeout(self, timeout: int) -> None:
         self.wait_timeout_calls.append(timeout)
+
+    def evaluate(self, script: str):
+        self.page_evaluate_calls.append(script)
+        return None
 
 
 class FakeSession:
@@ -155,8 +160,8 @@ class FakeBrowser:
         self.context = FakeContext(page)
 
 
-def scoped_like_selector(post_id: str) -> str:
-    return f"article[data-post-id='{post_id}'] {main.LIKE_BUTTON_SELECTORS[0]}"
+def scoped_click_target_selector(post_id: str) -> str:
+    return f"article[data-post-id='{post_id}'] {main.LIKE_CLICK_TARGET_SELECTORS[0]}"
 
 
 def test_build_topic_json_url_keeps_canonical_topic_path():
@@ -234,7 +239,7 @@ def test_click_like_skips_already_liked_posts_and_clicks_next_candidate(monkeypa
     page = FakeLikePage(
         {
             main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
-            scoped_like_selector("222"): [target_button],
+            scoped_click_target_selector("222"): [target_button],
         },
         [response],
     )
@@ -271,6 +276,10 @@ def test_click_like_skips_already_liked_posts_and_clicks_next_candidate(monkeypa
     assert target_button.click_count == 1
     assert target_button.last_timeout == main.LIKE_BUTTON_CLICK_TIMEOUT_MS
     assert page.expect_response_calls == [main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS]
+    assert page.page_evaluate_calls == [
+        main.LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT,
+        main.LIKE_RESTORE_HEADER_POINTER_EVENTS_SCRIPT,
+    ]
 
 
 def test_click_like_retries_next_candidate_after_403(monkeypatch):
@@ -290,8 +299,8 @@ def test_click_like_retries_next_candidate_after_403(monkeypatch):
     page = FakeLikePage(
         {
             main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
-            scoped_like_selector("111"): [first_button],
-            scoped_like_selector("222"): [second_button],
+            scoped_click_target_selector("111"): [first_button],
+            scoped_click_target_selector("222"): [second_button],
         },
         [response_111, response_222],
     )
@@ -341,7 +350,7 @@ def test_click_like_skips_candidate_missing_from_dom(monkeypatch):
     page = FakeLikePage(
         {
             main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
-            scoped_like_selector("222"): [target_button],
+            scoped_click_target_selector("222"): [target_button],
         },
         [response],
     )
@@ -376,7 +385,9 @@ def test_click_like_skips_candidate_missing_from_dom(monkeypatch):
     missing_candidate_calls = [
         call for call in page.locator_calls if call.startswith("article[data-post-id='111'] ")
     ]
-    assert len(missing_candidate_calls) == len(main.LIKE_BUTTON_SELECTORS)
+    assert len(missing_candidate_calls) == len(
+        main.LIKE_CLICK_TARGET_SELECTORS + main.LIKE_BUTTON_SELECTORS
+    )
 
 
 def test_click_like_retries_trusted_click_when_pointer_intercepted(monkeypatch):
@@ -396,7 +407,7 @@ def test_click_like_retries_trusted_click_when_pointer_intercepted(monkeypatch):
     page = FakeLikePage(
         {
             main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
-            scoped_like_selector("222"): [target_button],
+            scoped_click_target_selector("222"): [target_button],
         },
         [response],
     )
@@ -428,12 +439,18 @@ def test_click_like_retries_trusted_click_when_pointer_intercepted(monkeypatch):
 
     assert target_button.click_count == 1
     assert target_button.evaluate_calls == [
-        "(el) => el.scrollIntoView({block: 'center', inline: 'center'})",
-        "(el) => el.scrollIntoView({block: 'end', inline: 'center'})",
+        main.LIKE_BUTTON_REPOSITION_STEPS[0],
+        main.LIKE_BUTTON_REPOSITION_STEPS[1],
     ]
     assert page.expect_response_calls == [
         main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
         main.LIKE_BUTTON_RESPONSE_TIMEOUT_MS,
+    ]
+    assert page.page_evaluate_calls == [
+        main.LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT,
+        main.LIKE_RESTORE_HEADER_POINTER_EVENTS_SCRIPT,
+        main.LIKE_DISABLE_HEADER_POINTER_EVENTS_SCRIPT,
+        main.LIKE_RESTORE_HEADER_POINTER_EVENTS_SCRIPT,
     ]
 
 
@@ -461,8 +478,8 @@ def test_click_like_skips_candidate_when_pointer_intercept_persists(monkeypatch)
     page = FakeLikePage(
         {
             main.LIKE_BUTTON_SELECTORS[0]: [FakeButton()],
-            scoped_like_selector("111"): [first_button],
-            scoped_like_selector("222"): [second_button],
+            scoped_click_target_selector("111"): [first_button],
+            scoped_click_target_selector("222"): [second_button],
         },
         [response],
     )
@@ -496,9 +513,9 @@ def test_click_like_skips_candidate_when_pointer_intercept_persists(monkeypatch)
     assert first_button.click_count == 0
     assert second_button.click_count == 1
     assert first_button.evaluate_calls == [
-        "(el) => el.scrollIntoView({block: 'center', inline: 'center'})",
-        "(el) => el.scrollIntoView({block: 'end', inline: 'center'})",
-        "(el) => el.scrollIntoView({block: 'start', inline: 'center'})",
+        main.LIKE_BUTTON_REPOSITION_STEPS[0],
+        main.LIKE_BUTTON_REPOSITION_STEPS[1],
+        main.LIKE_BUTTON_REPOSITION_STEPS[2],
     ]
 
 
